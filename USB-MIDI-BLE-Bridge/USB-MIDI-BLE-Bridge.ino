@@ -351,42 +351,69 @@ static void drawStatusPill(int16_t x, int16_t y, const char* label, const char* 
 
 static void drawTypingCat(uint32_t nowMs, bool midiActive)
 {
-    const uint16_t fur = RGB565(208, 216, 224);
-    const uint16_t shadow = RGB565(72, 84, 96);
-    const uint16_t key = midiActive ? RGB565_LIME : RGB565_CYAN;
-    const bool pawFrame = ((nowMs / 450) % 2) == 0;
-    const bool blink = ((nowMs / 2200) % 5) == 0;
+    const uint16_t fur = RGB565(226, 232, 232);
+    const uint16_t line = RGB565(48, 56, 64);
+    const uint16_t table = RGB565(96, 64, 40);
+    const uint16_t drum = midiActive ? RGB565_LIME : RGB565_CYAN;
+    const bool leftHit = midiActive && ((nowMs / 160) % 2 == 0);
+    const bool rightHit = midiActive && !leftHit;
+    const bool idleTap = !midiActive && ((nowMs / 900) % 2 == 0);
+    const bool blink = ((nowMs / 2600) % 5) == 0;
 
     display->fillRect(18, 66, 204, 72, RGB565_BLACK);
 
-    display->fillRoundRect(130, 100, 76, 18, 4, RGB565(20, 28, 36));
-    for (int i = 0; i < 6; i++) {
-        display->fillRoundRect(136 + (i * 10), 104, 7, 6, 2, key);
-    }
+    // Table layer.
+    display->fillRoundRect(42, 116, 156, 16, 5, table);
+    display->drawFastHLine(48, 119, 144, RGB565(160, 104, 56));
 
-    display->fillCircle(78, 99, 32, fur);
-    display->fillTriangle(54, 78, 66, 52, 76, 78, fur);
-    display->fillTriangle(80, 76, 94, 52, 104, 82, fur);
-    display->fillCircle(67, 95, 3, RGB565_BLACK);
-    display->fillCircle(89, 95, 3, RGB565_BLACK);
+    // Body and head layer.
+    display->fillRoundRect(62, 92, 64, 40, 18, fur);
+    display->fillCircle(84, 82, 31, fur);
+    display->fillTriangle(60, 66, 68, 43, 78, 67, fur);
+    display->fillTriangle(90, 66, 103, 43, 108, 72, fur);
+    display->drawCircle(84, 82, 31, line);
+    display->drawLine(60, 66, 68, 43, line);
+    display->drawLine(68, 43, 78, 67, line);
+    display->drawLine(90, 66, 103, 43, line);
+    display->drawLine(103, 43, 108, 72, line);
+
     if (blink) {
-        display->drawLine(64, 95, 70, 95, RGB565_BLACK);
-        display->drawLine(86, 95, 92, 95, RGB565_BLACK);
+        display->drawLine(72, 80, 78, 80, RGB565_BLACK);
+        display->drawLine(91, 80, 97, 80, RGB565_BLACK);
+    } else {
+        display->fillCircle(75, 80, 3, RGB565_BLACK);
+        display->fillCircle(94, 80, 3, RGB565_BLACK);
     }
-    display->fillCircle(78, 106, 3, RGB565_DARKGRAY);
-    display->drawLine(78, 109, 72, 114, shadow);
-    display->drawLine(78, 109, 84, 114, shadow);
+    display->fillCircle(84, 89, 3, RGB565_DARKGRAY);
+    display->drawLine(84, 92, 78, 97, line);
+    display->drawLine(84, 92, 90, 97, line);
+    display->drawLine(57, 87, 43, 82, line);
+    display->drawLine(58, 92, 42, 92, line);
+    display->drawLine(58, 97, 43, 102, line);
 
-    display->fillRoundRect(108, pawFrame ? 102 : 110, 22, 10, 5, fur);
-    display->fillRoundRect(154, pawFrame ? 110 : 102, 22, 10, 5, fur);
-    display->drawLine(42, 118, 28, 124, fur);
-    display->drawLine(42, 120, 28, 120, fur);
-    display->drawLine(42, 122, 28, 116, fur);
+    // Bongo layer.
+    display->fillCircle(146, 109, 20, RGB565(32, 38, 48));
+    display->fillCircle(184, 109, 20, RGB565(32, 38, 48));
+    display->drawCircle(146, 109, 20, drum);
+    display->drawCircle(184, 109, 20, drum);
+    display->fillCircle(146, 109, 11, RGB565(20, 24, 32));
+    display->fillCircle(184, 109, 11, RGB565(20, 24, 32));
 
-    printDisplayLine(128, 72, 1, RGB565_LIGHTGRAY, midiActive ? "typing notes" : "waiting");
-    if ((nowMs / 500) % 2 == 0) {
-        display->fillRect(205, 72, 6, 8, RGB565_GOLD);
+    // Paw layer.
+    display->fillRoundRect(116, (leftHit || idleTap) ? 103 : 94, 32, 13, 7, fur);
+    display->fillRoundRect(168, rightHit ? 103 : 94, 32, 13, 7, fur);
+    display->drawRoundRect(116, (leftHit || idleTap) ? 103 : 94, 32, 13, 7, line);
+    display->drawRoundRect(168, rightHit ? 103 : 94, 32, 13, 7, line);
+
+    if (leftHit) {
+        display->drawCircle(146, 109, 24, RGB565_GOLD);
     }
+    if (rightHit) {
+        display->drawCircle(184, 109, 24, RGB565_GOLD);
+    }
+
+    printDisplayLine(128, 72, 1, midiActive ? RGB565_LIME : RGB565_LIGHTGRAY,
+                     midiActive ? "bongo notes" : "idle");
 }
 
 static void updateDisplayDashboard(bool force)
@@ -397,10 +424,6 @@ static void updateDisplayDashboard(bool force)
 
     static uint32_t lastDrawMs = 0;
     if (!force && millis() - lastDrawMs < 750) {
-        return;
-    }
-
-    if (!force && !displayRefreshPending) {
         return;
     }
 
@@ -417,7 +440,7 @@ static void updateDisplayDashboard(bool force)
         display->fillRoundRect(6, 6, 228, 228, 10, RGB565(8, 16, 28));
         display->drawRoundRect(6, 6, 228, 228, 10, RGB565_CYAN);
         display->fillRoundRect(12, 12, 216, 216, 8, RGB565_BLACK);
-        printDisplayLine(22, 20, 2, RGB565_CYAN, "PIANO CAT");
+        printDisplayLine(22, 20, 2, RGB565_CYAN, "BONGO MIDI");
         printDisplayLine(22, 44, 1, RGB565_GOLD, BLE_DEVICE_NAME);
         displayStaticDrawn = true;
     }
