@@ -338,6 +338,57 @@ static void printMetricLine(int16_t y, const char* label, const char* value, uin
     printDisplayLine(82, y, 1, valueColor, value);
 }
 
+static void drawStatusPill(int16_t x, int16_t y, const char* label, const char* value, bool ok)
+{
+    const uint16_t border = ok ? RGB565_LIME : RGB565_GOLD;
+    const uint16_t fill = ok ? RGB565(0, 52, 28) : RGB565(64, 44, 0);
+
+    display->fillRoundRect(x, y, 94, 42, 8, fill);
+    display->drawRoundRect(x, y, 94, 42, 8, border);
+    printDisplayLine(x + 8, y + 7, 1, RGB565_LIGHTGRAY, label);
+    printDisplayLine(x + 8, y + 21, 2, border, value);
+}
+
+static void drawTypingCat(uint32_t nowMs, bool midiActive)
+{
+    const uint16_t fur = RGB565(208, 216, 224);
+    const uint16_t shadow = RGB565(72, 84, 96);
+    const uint16_t key = midiActive ? RGB565_LIME : RGB565_CYAN;
+    const bool pawFrame = ((nowMs / 450) % 2) == 0;
+    const bool blink = ((nowMs / 2200) % 5) == 0;
+
+    display->fillRect(18, 66, 204, 72, RGB565_BLACK);
+
+    display->fillRoundRect(130, 100, 76, 18, 4, RGB565(20, 28, 36));
+    for (int i = 0; i < 6; i++) {
+        display->fillRoundRect(136 + (i * 10), 104, 7, 6, 2, key);
+    }
+
+    display->fillCircle(78, 99, 32, fur);
+    display->fillTriangle(54, 78, 66, 52, 76, 78, fur);
+    display->fillTriangle(80, 76, 94, 52, 104, 82, fur);
+    display->fillCircle(67, 95, 3, RGB565_BLACK);
+    display->fillCircle(89, 95, 3, RGB565_BLACK);
+    if (blink) {
+        display->drawLine(64, 95, 70, 95, RGB565_BLACK);
+        display->drawLine(86, 95, 92, 95, RGB565_BLACK);
+    }
+    display->fillCircle(78, 106, 3, RGB565_DARKGRAY);
+    display->drawLine(78, 109, 72, 114, shadow);
+    display->drawLine(78, 109, 84, 114, shadow);
+
+    display->fillRoundRect(108, pawFrame ? 102 : 110, 22, 10, 5, fur);
+    display->fillRoundRect(154, pawFrame ? 110 : 102, 22, 10, 5, fur);
+    display->drawLine(42, 118, 28, 124, fur);
+    display->drawLine(42, 120, 28, 120, fur);
+    display->drawLine(42, 122, 28, 116, fur);
+
+    printDisplayLine(128, 72, 1, RGB565_LIGHTGRAY, midiActive ? "typing notes" : "waiting");
+    if ((nowMs / 500) % 2 == 0) {
+        display->fillRect(205, 72, 6, 8, RGB565_GOLD);
+    }
+}
+
 static void updateDisplayDashboard(bool force)
 {
     if (!displayReady) {
@@ -358,46 +409,42 @@ static void updateDisplayDashboard(bool force)
 
     const bool usbConnected = usbMidi.isConnected();
     const bool bleConnected = bleMidi.isConnected();
+    const uint32_t nowMs = millis();
+    const bool midiActive = lastMidiMs > 0 && nowMs - lastMidiMs < 700;
 
     if (!displayStaticDrawn || force) {
         display->fillScreen(RGB565_BLACK);
-        display->fillRoundRect(6, 6, 228, 228, 10, RGB565_NAVY);
+        display->fillRoundRect(6, 6, 228, 228, 10, RGB565(8, 16, 28));
         display->drawRoundRect(6, 6, 228, 228, 10, RGB565_CYAN);
         display->fillRoundRect(12, 12, 216, 216, 8, RGB565_BLACK);
-        printDisplayLine(24, 20, 2, RGB565_CYAN, "PIANO BLE");
-        printDisplayLine(24, 44, 1, RGB565_GOLD, BLE_DEVICE_NAME);
+        printDisplayLine(22, 20, 2, RGB565_CYAN, "PIANO CAT");
+        printDisplayLine(22, 44, 1, RGB565_GOLD, BLE_DEVICE_NAME);
         displayStaticDrawn = true;
     }
 
-    display->fillRect(18, 66, 204, 158, RGB565_BLACK);
-
-    printDisplayLine(22, 70, 1, RGB565_LIGHTGRAY, "USB from Roland");
-    printDisplayLine(22, 84, 2, usbConnected ? RGB565_LIME : RGB565_GOLD,
-                     usbConnected ? "USB OK" : "USB WAIT");
-
-    printDisplayLine(22, 112, 1, RGB565_LIGHTGRAY, "iPad Bluetooth");
-    printDisplayLine(22, 126, 2, bleConnected ? RGB565_LIME : RGB565_GOLD,
-                     bleConnected ? "BLE OK" : "BLE READY");
+    drawTypingCat(nowMs, midiActive);
+    display->fillRect(18, 140, 204, 84, RGB565_BLACK);
+    drawStatusPill(20, 142, "Roland USB", usbConnected ? "OK" : "WAIT", usbConnected);
+    drawStatusPill(126, 142, "iPad BLE", bleConnected ? "OK" : "READY", bleConnected);
 
     char value[48] = {0};
-    snprintf(value, sizeof(value), "Notes: %lu", usbPacketsSeen);
-    printDisplayLine(22, 156, 1, usbPacketsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+    snprintf(value, sizeof(value), "Notes %lu", usbPacketsSeen);
+    printDisplayLine(22, 190, 1, usbPacketsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
 
-    snprintf(value, sizeof(value), "Sent: %lu  Skip: %lu", blePacketsSent, blePacketsSkipped);
-    printDisplayLine(22, 172, 1, blePacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+    snprintf(value, sizeof(value), "Sent %lu  Skip %lu", blePacketsSent, blePacketsSkipped);
+    printDisplayLine(110, 190, 1, blePacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
 
-    printDisplayLine(22, 192, 1, RGB565_LIGHTGRAY, "Last:");
-    printDisplayLine(58, 192, 1, lastMidiMs > 0 ? RGB565_WHITE : RGB565_DARKGRAY, lastMidiText);
+    printDisplayLine(22, 204, 1, lastMidiMs > 0 ? RGB565_WHITE : RGB565_DARKGRAY, lastMidiText);
 
     if (!usbConnected) {
-        printDisplayLine(22, 212, 1, RGB565_GOLD,
+        printDisplayLine(22, 218, 1, RGB565_GOLD,
                          usbMidi.getLastError().length() > 0 ? "Check Roland USB mode" : "Use HOST + power USB_DEV");
     } else if (usbPacketsSeen == 0) {
-        printDisplayLine(22, 212, 1, RGB565_GOLD, "Press keys to test");
+        printDisplayLine(22, 218, 1, RGB565_GOLD, "Press keys to test");
     } else if (!bleConnected) {
-        printDisplayLine(22, 212, 1, RGB565_GOLD, "Connect app to BLE");
+        printDisplayLine(22, 218, 1, RGB565_GOLD, "Connect app to BLE");
     } else {
-        printDisplayLine(22, 212, 1, RGB565_LIME, "MIDI is flowing");
+        printDisplayLine(22, 218, 1, RGB565_LIME, "MIDI is flowing");
     }
 }
 
