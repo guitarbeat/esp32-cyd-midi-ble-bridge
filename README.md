@@ -7,149 +7,175 @@ Bluetooth LE MIDI instrument using inexpensive ESP32 hardware.
 USB MIDI piano -> ESP32 bridge -> Bluetooth LE MIDI -> iPad, iPhone, Mac, Android, DAW
 ```
 
-The main target is an ESP32-S3 board with native USB-OTG host support. The repo
-also includes a classic ESP32 fallback sketch for boards that use an external
-MAX3421E USB host module.
+Use it with GarageBand, MIDI games, DAWs, or any app that supports Bluetooth LE MIDI.
+
+## Why I Built This
+
+I wanted to send MIDI from my Roland F-20 digital piano to my iPad (GarageBand)
+wirelessly, the same job done by commercial dongles like the
+[DoReMiDi UTB-21 Pro](https://www.doremidi.cn/h-pd-25.html) (USB MIDI to Bluetooth
+MIDI adapter). This project is an open, hackable replacement for that device:
+
+- Same core job: USB MIDI host IN → Bluetooth LE MIDI out, no computer in the middle.
+- Cheap, common hardware (ESP32-S3-USB-OTG) instead of a sealed dongle.
+- A real display: connection status, link health, a mini keyboard, and Bongo Cat.
+- Settings you can change on the device (transpose, channel filter) and that persist.
+- WiFi **RTP-MIDI** (Apple MIDI) alongside BLE — join the board’s setup WiFi on first use; see [BUILD.md](BUILD.md).
+- Fully open firmware you can read, modify, and reflash.
 
 ## What Works
 
-- USB MIDI input from class-compliant digital pianos and MIDI controllers,
-  including many Roland, Yamaha, Casio, Kawai, and other USB MIDI instruments.
+- USB MIDI input from class-compliant digital pianos and MIDI controllers.
 - Bluetooth LE MIDI output to iOS, iPadOS, macOS, Android, and desktop apps.
+- **WiFi RTP-MIDI** (Apple MIDI) alongside BLE — captive-portal setup on first boot; see [BUILD.md](BUILD.md).
+- **OTA updates** over WiFi when on your LAN — no USB cable for routine firmware flashes; see [BUILD.md](BUILD.md).
 - A visible startup/status screen on the Espressif ESP32-S3-USB-OTG board.
-- Reproducible Arduino CLI builds for both supported firmware paths.
+- **Bongo Cat** sprite animation (from [vostoklabs/bongo_cat_monitor](https://github.com/vostoklabs/bongo_cat_monitor)) driven by your playing.
+- On-screen **mini keyboard**, **velocity bar**, **sustain** indicator, and **notes/min** counter.
+- **Board buttons** (ESP32-S3-USB-OTG): UP/DOWN transpose, MENU cycles channel filter, MENU hold cycles backlight dim, OK cycles display mode, OK hold panic/pause.
+- **Backlight dim** after 90 s idle (configurable via MENU hold); wakes on MIDI activity.
+- **NVS settings**: transpose, MIDI channel filter, display mode, backlight timeout (saved across reboots).
+- **Link health** on Full display: USB→BLE forwarding latency (when connected).
+- **Stage display mode**: cat-focused view with status hidden.
+- Reproducible Arduino CLI builds and prebuilt firmware binaries from CI.
 
 ## Current Limits
 
-- MIDI is currently one-way: piano to Bluetooth MIDI app.
+- One-way by default: piano → BLE (USB host IN → BLE notify).
+- Optional compile-time BLE → USB (see [BUILD.md](BUILD.md)); most digital pianos
+  are receive-only over USB, so this rarely applies.
 - Bluetooth audio is not supported.
-- Some keyboards need a real USB host power source on VBUS before they enumerate.
+- Some keyboards need 5 V VBUS on the host port before they enumerate.
 - BLE MIDI latency depends on the receiving device and app.
+
+## MIDI 2.0
+
+Short version: this bridge speaks MIDI 1.0 today, and that is the right choice for
+the F-20 → iPad use case.
+
+- As of 2026 there is no finalized BLE MIDI 2.0 transport. Apps like GarageBand
+  connect to this bridge as BLE MIDI 1.0; there is no standard way to carry MIDI 2.0
+  over Bluetooth that they would understand yet.
+- The Roland F-20 (and most current pianos) are MIDI 1.0 sources. MIDI 2.0's benefits
+  (16-bit velocity, 32-bit controllers) cannot be invented from a 7-bit 1.0 source.
+
+### Roadmap: USB MIDI 2.0 host ingest
+
+A future enhancement is to host native USB MIDI 2.0 devices and parse Universal MIDI
+Packets (UMP) directly. The ESP32-S3 can do this (see the UMP host work in
+[sauloverissimo/ESP32_Host_MIDI](https://github.com/sauloverissimo/ESP32_Host_MIDI)).
+Until BLE MIDI 2.0 ships, such input would still down-scale to BLE MIDI 1.0 on output,
+so this is tracked as forward-looking, not a current feature.
 
 ## Recommended Hardware
 
-### Best Path: ESP32-S3 Native USB Host
+### Primary: ESP32-S3 with native USB host
 
-Use an ESP32-S3 board that exposes USB-OTG host D+/D- and can power the attached
-USB MIDI device. This repo has been set up for the official Espressif
-ESP32-S3-USB-OTG Development Board.
+The supported product firmware is **[USB-MIDI-BLE-Bridge](USB-MIDI-BLE-Bridge/)** for an
+ESP32-S3 board with USB-OTG host. This repo is tested on the official Espressif
+**ESP32-S3-USB-OTG** development board (display + Type-A host + `USB_DEV` power).
 
-For that board:
+Wiring for that board:
 
-- Use the Micro-USB `USB-to-UART` port for flashing and logs.
-- Use the Type-A host port for the piano or MIDI controller.
-- Power the board so the host port can supply 5 V VBUS to the MIDI device.
-- The display shows the Bluetooth name and live USB/BLE status.
+- Micro-USB **USB-to-UART** — flash firmware and serial logs.
+- Type-A **USB HOST** — piano or MIDI controller.
+- **USB_DEV** — 5 V power so the host port can supply VBUS to the keyboard.
 
 ### Fallback: Classic ESP32 + MAX3421E
 
-Classic ESP32 boards do not have a native USB host peripheral. Their USB
-connector is only for flashing/logging. To use one, add a MAX3421E USB host
-module and build the fallback sketch in
-`Classic-ESP32-MAX3421E-MIDI-BLE`.
+Only if you already have a **classic ESP32** (not S3): add a MAX3421E USB host
+shield/module and build **[Classic-ESP32-MAX3421E-MIDI-BLE](Classic-ESP32-MAX3421E-MIDI-BLE/)**.
+Classic ESP32 boards cannot host USB MIDI from their onboard USB connector alone.
 
-## Firmware Choices
+## Quick Start
 
-| Folder | Hardware | Use when |
-| --- | --- | --- |
-| `USB-MIDI-BLE-Bridge` | ESP32-S3 with native USB-OTG host | You have an ESP32-S3 USB host board |
-| `Classic-ESP32-MAX3421E-MIDI-BLE` | Classic ESP32 + MAX3421E host module | You have a non-S3 ESP32 board |
-| `CT-USB-BLE` | Legacy/raw experiment | Kept for reference |
+1. **Get hardware** — ESP32-S3-USB-OTG (recommended) or classic ESP32 + MAX3421E.
+2. **Flash firmware** — download the latest `USB-MIDI-BLE-Bridge` `.bin` from the
+   [GitHub Actions](https://github.com/guitarbeat/esp32-cyd-midi-ble-bridge/actions)
+   workflow artifacts, or build with Arduino CLI (see [BUILD.md](BUILD.md)).
+3. **Wire the piano** — keyboard → Type-A host; board powered (including `USB_DEV` on the OTG board).
+4. **Pair in your app** — open GarageBand (or your MIDI app) → Bluetooth MIDI devices → connect to **Piano BLE Bridge**.
+5. **Play** — the display should show USB OK and BLE connected; note events should appear in the app.
 
 ## Bluetooth Name
 
-The default BLE MIDI name is:
+Default BLE name: **Piano BLE Bridge**
 
-```text
-Piano BLE Bridge
-```
+Change it by editing `BLE_DEVICE_NAME_TEXT` in the sketch or passing a build flag
+(see [BUILD.md](BUILD.md)).
 
-On the ESP32-S3-USB-OTG display build, this same name is printed on the screen at
-boot. To change it, edit `BLE_DEVICE_NAME_TEXT` in the sketch or pass a compiler
-define in your build flags.
+## Build From Source
 
-## Build With Arduino CLI
-
-Install Arduino CLI, then install the ESP32 core and libraries:
+Contributor-oriented steps live in [BUILD.md](BUILD.md). Short version:
 
 ```bash
 arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 arduino-cli core update-index
 arduino-cli core install esp32:esp32
-arduino-cli lib install FastLED "USB Host Shield Library 2.0" "GFX Library for Arduino"
-```
-
-Build the ESP32-S3 native USB host firmware:
-
-```bash
+arduino-cli lib install "USB Host Shield Library 2.0" "GFX Library for Arduino"
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc' \
   ./USB-MIDI-BLE-Bridge
 ```
 
-Upload to the Espressif ESP32-S3-USB-OTG board:
-
-```bash
-arduino-cli upload \
-  -p /dev/cu.usbserial-1110 \
-  --fqbn 'esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc' \
-  ./USB-MIDI-BLE-Bridge
-```
-
-Build the classic ESP32 fallback:
-
-```bash
-arduino-cli compile --fqbn esp32:esp32:esp32 ./Classic-ESP32-MAX3421E-MIDI-BLE
-```
-
 ## Pairing
 
-1. Flash the correct firmware for your hardware.
-2. Plug the piano or MIDI controller into the ESP32 host port.
-3. Power the ESP32 bridge.
-4. Open a MIDI-capable app.
-5. Use the app's Bluetooth MIDI device menu and connect to `Piano BLE Bridge`.
-6. Play notes and confirm the app receives MIDI input.
-
-On iOS and iPadOS, BLE MIDI devices are usually paired inside music apps, not in
-the normal system Bluetooth settings.
+1. Flash the firmware for your board (S3 product sketch or classic fallback).
+2. Plug the piano into the ESP32 **host** port.
+3. Power the bridge (see hardware section for VBUS).
+4. In your MIDI app, open the **Bluetooth MIDI** device list (not always the system Bluetooth settings on iOS).
+5. Connect to **Piano BLE Bridge** and play a few keys.
 
 ## Troubleshooting
 
 ### The Piano Does Not Connect Over USB
 
-- Confirm the piano is class-compliant USB MIDI.
-- Confirm the ESP32 host port is supplying 5 V VBUS. On the Espressif
-  ESP32-S3-USB-OTG board, powering only the Micro-USB `USB-to-UART` port can
-  boot the bridge and advertise Bluetooth while leaving the Type-A host port
-  unpowered. Use the Type-A `USB HOST` port for the piano and provide 5 V power
-  on the `USB_DEV` port.
-- Try another known data-capable USB cable.
-- For ESP32-S3-USB-OTG, use the Type-A host port for the piano and the Micro-USB
-  USB-to-UART port for flashing/logs.
+- Confirm the instrument is **class-compliant USB MIDI**.
+- Confirm **5 V VBUS** on the host port. On ESP32-S3-USB-OTG, Micro-USB debug power alone
+  can boot BLE while the Type-A port has no power for the keyboard — use **USB HOST**
+  for the piano and **USB_DEV** for 5 V.
+- Try another data-capable USB cable.
+- Check the on-screen hint: `Use HOST + power USB_DEV`.
+
+### Bluetooth Connects But No Notes in the App
+
+- If the display shows **USB WAIT**, the keyboard is not enumerated — fix power/cable first.
+- If **USB OK** but note counters stay at 0, check the piano’s USB mode (often “Generic” / class-compliant MIDI).
+- If USB counters increase but the app is silent, check the app’s **BLE MIDI input** routing.
+
+### Unplugging the Piano
+
+When the USB keyboard is removed, the bridge **stays running** and waits for you to plug
+the piano back in. Bluetooth MIDI should remain connected in your app — you usually do not
+need to reconnect BLE after replugging. If MIDI does not resume, replug the piano or restart
+the app’s BLE MIDI session.
 
 ### No Bluetooth MIDI Device Appears
 
-- Confirm the firmware booted. On the ESP32-S3-USB-OTG board, the display should
-  show `Piano BLE Bridge`.
-- Open the Bluetooth MIDI device menu inside your music app.
-- Restart the ESP32 after changing BLE settings or names.
+- Confirm the firmware booted (display shows **Piano BLE Bridge** on the OTG board).
+- Use the MIDI app’s Bluetooth MIDI menu, not only system Bluetooth on iOS.
+- Restart the board after changing the BLE name.
 
 ### Classic ESP32 Board Does Not See USB MIDI
 
-A classic ESP32 cannot become a USB host in firmware. Use the MAX3421E fallback
+A classic ESP32 cannot USB-host from its built-in connector. Use the MAX3421E fallback
 sketch or switch to an ESP32-S3 native USB host board.
+
+## Upstream Reference
+
+USB host and BLE patterns are inspired by
+[sauloverissimo/ESP32_Host_MIDI](https://github.com/sauloverissimo/ESP32_Host_MIDI)
+(MIT). This repo is a **single-purpose bridge**, not a copy of that multi-transport library.
 
 ## Development
 
-GitHub Actions compile the supported sketches on every push and pull request.
-See [BUILD.md](BUILD.md) for board-specific notes.
+GitHub Actions compile both supported sketches on every push and publish an S3
+firmware artifact. See [BUILD.md](BUILD.md) for FQBNs, pins, and recovery.
 
 ## Credits
 
-This project builds on the ESP32 USB MIDI host work by
-[sauloverissimo](https://github.com/sauloverissimo/ESP32_Host_MIDI) and later
-keyboard bridge work by Liam Jones.
+ESP32 USB MIDI host work by [sauloverissimo](https://github.com/sauloverissimo/ESP32_Host_MIDI);
+bridge and display work by Liam Jones.
 
 ## License
 

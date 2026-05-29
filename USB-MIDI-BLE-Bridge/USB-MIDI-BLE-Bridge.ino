@@ -12,12 +12,27 @@
 #include <Arduino_GFX_Library.h>
 #include "USBConnection.h"
 #include "BLEConnection.h"
+#include "bongo_cat/BongoCat.h"
+#include "BridgeUi.h"
+#include "BridgeSettings.h"
+#include "RTPMidiConfig.h"
+#include "NetworkServices.h"
+#include "MidiBridge.h"
+#include "MidiCodec.h"
 
 #ifndef BLE_DEVICE_NAME_TEXT
 #define BLE_DEVICE_NAME_TEXT "Piano BLE Bridge"
 #endif
 
-static const char* BLE_DEVICE_NAME = BLE_DEVICE_NAME_TEXT;
+#ifndef ENABLE_BLE_TO_USB
+#define ENABLE_BLE_TO_USB 0
+#endif
+
+#ifndef RTP_MIDI_SESSION_NAME
+#define RTP_MIDI_SESSION_NAME BLE_DEVICE_NAME_TEXT
+#endif
+
+static const char* kDefaultBleName = BLE_DEVICE_NAME_TEXT;
 static const uint32_t SERIAL_BAUD = 115200;
 
 // Official Espressif ESP32-S3-USB-OTG board controls. These are harmless on
@@ -87,122 +102,21 @@ static Arduino_GFX* display = new Arduino_ST7789(
 
 BLEConnection bleMidi;
 
-static uint32_t usbPacketsSeen = 0;
 static uint32_t midiEventsSeen = 0;
 static uint32_t noteEventsSeen = 0;
-static uint32_t blePacketsSent = 0;
-static uint32_t blePacketsSkipped = 0;
+static uint32_t blePacketsReceived = 0;
+static uint32_t usbPacketsSent = 0;
+static uint32_t usbPacketsSkipped = 0;
 static bool displayReady = false;
 static uint32_t lastMidiMs = 0;
 static char lastMidiText[36] = "none";
-static bool activeNotes[128] = {false};
-static uint8_t activeNotesCount = 0;
 static bool displayRefreshPending = true;
 static bool displayStaticDrawn = false;
-
-static uint8_t midiLengthFromStatus(uint8_t status)
-{
-    if (status >= 0xF8) return 1; // Realtime messages.
-
-    switch (status & 0xF0) {
-        case 0xC0: // Program Change
-        case 0xD0: // Channel Pressure
-            return 2;
-        case 0x80: // Note Off
-        case 0x90: // Note On
-        case 0xA0: // Poly Pressure
-        case 0xB0: // Control Change
-        case 0xE0: // Pitch Bend
-            return 3;
-        default:
-            break;
-    }
-
-    switch (status) {
-        case 0xF1: // MTC Quarter Frame
-        case 0xF3: // Song Select
-            return 2;
-        case 0xF2: // Song Position Pointer
-            return 3;
-        case 0xF6: // Tune Request
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static uint8_t midiLengthFromUsbCin(uint8_t cin, uint8_t status)
-{
-    switch (cin & 0x0F) {
-        case 0x2: return 2; // Two-byte system common.
-        case 0x3: return 3; // Three-byte system common.
-        case 0x4: return 3; // SysEx start/continue.
-        case 0x5: return 1; // SysEx ends with one byte.
-        case 0x6: return 2; // SysEx ends with two bytes.
-        case 0x7: return 3; // SysEx ends with three bytes.
-        case 0x8: return 3; // Note Off.
-        case 0x9: return 3; // Note On.
-        case 0xA: return 3; // Poly Pressure.
-        case 0xB: return 3; // Control Change.
-        case 0xC: return 2; // Program Change.
-        case 0xD: return 2; // Channel Pressure.
-        case 0xE: return 3; // Pitch Bend.
-        case 0xF: return 1; // Single byte.
-        default:
-            return midiLengthFromStatus(status);
-    }
-}
-
-static bool buildBleMidiPacket(const uint8_t* usbMidiPacket, size_t usbLength, uint8_t* blePacket, size_t* bleLength)
-{
-    if (usbLength < 4 || blePacket == nullptr || bleLength == nullptr) {
-        return false;
-    }
-
-    const uint8_t cin = usbMidiPacket[0] & 0x0F;
-    const uint8_t status = usbMidiPacket[1];
-    const uint8_t midiLength = midiLengthFromUsbCin(cin, status);
-
-    if (midiLength == 0 || midiLength > 3 || status == 0x00) {
-        return false;
-    }
-
-    const uint16_t timestamp = millis() & 0x1FFF;
-    blePacket[0] = 0x80 | ((timestamp >> 7) & 0x3F);
-    blePacket[1] = 0x80 | (timestamp & 0x7F);
-
-    for (uint8_t i = 0; i < midiLength; i++) {
-        blePacket[2 + i] = usbMidiPacket[1 + i];
-    }
-
-    *bleLength = 2 + midiLength;
-    return true;
-}
-
-static const char* statusName(uint8_t status)
-{
-    switch (status & 0xF0) {
-        case 0x80: return "NoteOff";
-        case 0x90: return "NoteOn";
-        case 0xA0: return "PolyPressure";
-        case 0xB0: return "ControlChange";
-        case 0xC0: return "ProgramChange";
-        case 0xD0: return "ChannelPressure";
-        case 0xE0: return "PitchBend";
-        default: return "System";
-    }
-}
-
-static const char* noteName(uint8_t note, char* buffer, size_t bufferLength)
-{
-    static const char* names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    const int octave = (note / 12) - 1;
-    snprintf(buffer, bufferLength, "%s%d", names[note % 12], octave);
-    return buffer;
-}
+static BongoCatDisplay bongoCat;
 
 static void updateDisplayDashboard(bool force = false);
 static void markDisplayMidiEvent(const uint8_t* data);
+static void markDisplayRawMidiEvent(const uint8_t* data, size_t length);
 
 class UsbMidiInput : public USBConnection {
 public:
@@ -217,42 +131,34 @@ public:
     void onDeviceDisconnected() override
     {
         Serial.println("[USB] MIDI device disconnected.");
+        displayRefreshPending = true;
     }
 
     void onMidiDataReceived(const uint8_t* data, size_t length) override
     {
-        usbPacketsSeen++;
-
-        uint8_t blePacket[5] = {0};
-        size_t bleLength = 0;
-
-        if (!buildBleMidiPacket(data, length, blePacket, &bleLength)) {
-            if (length >= 2) {
-                Serial.printf("[USB] Ignored packet CIN=%02X status=%02X\n", data[0] & 0x0F, data[1]);
-            } else {
-                Serial.printf("[USB] Ignored short packet length=%u\n", static_cast<unsigned>(length));
-            }
-            return;
+        uint8_t midiPacket[4] = {0};
+        const MidiBridge::Result result = midiBridge.forward(data, length, midiPacket);
+        if (result == MidiBridge::Result::kForwarded) {
+            markDisplayMidiEvent(midiPacket);
         }
-
-        Serial.printf("[USB] %-15s ch=%u data1=%3u data2=%3u BLE=%s\n",
-                      statusName(data[1]),
-                      ((data[1] & 0x0F) + 1),
-                      data[2],
-                      data[3],
-                      bleMidi.isConnected() ? "connected" : "waiting");
-
-        if (bleMidi.isConnected() && bleMidi.sendMidi(blePacket, bleLength)) {
-            blePacketsSent++;
-        } else {
-            blePacketsSkipped++;
-        }
-
-        markDisplayMidiEvent(data);
     }
 };
 
 UsbMidiInput usbMidi;
+
+#if ENABLE_BLE_TO_USB
+static void onBleMidiReceived(const uint8_t* data, size_t length)
+{
+    blePacketsReceived++;
+    if (usbMidi.sendMidiMessage(data, length)) {
+        usbPacketsSent++;
+    } else {
+        usbPacketsSkipped++;
+    }
+    markDisplayRawMidiEvent(data, length);
+    displayRefreshPending = true;
+}
+#endif
 
 static void printStartupBanner()
 {
@@ -260,7 +166,7 @@ static void printStartupBanner()
     Serial.println("=== USB MIDI to BLE MIDI Bridge ===");
     Serial.println("Target: ESP32-S3 with USB-OTG host");
     Serial.print("BLE name: ");
-    Serial.println(BLE_DEVICE_NAME);
+    Serial.println(bridgeSettings.bleDeviceName());
     Serial.println("Connect your iPhone from an app's Bluetooth MIDI device menu.");
     Serial.println();
 }
@@ -286,7 +192,6 @@ static void initDisplay()
 
 #if LCD_BACKLIGHT_PIN >= 0
     pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
-    digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
 #endif
 
     displayReady = display->begin(40000000);
@@ -295,6 +200,8 @@ static void initDisplay()
         return;
     }
 
+    bridgeUi.begin(display, LCD_BACKLIGHT_PIN);
+    bongoCat.begin();
     displayStaticDrawn = false;
     updateDisplayDashboard(true);
 }
@@ -331,6 +238,21 @@ static void updateDisplayStatus(bool usbConnected, bool bleConnected)
     displayRefreshPending = true;
 }
 
+static void markDisplayRawMidiEvent(const uint8_t* data, size_t length)
+{
+    uint8_t usbPacket[4] = {0, 0, 0, 0};
+    if (length >= 1) {
+        usbPacket[1] = data[0];
+    }
+    if (length >= 2) {
+        usbPacket[2] = data[1];
+    }
+    if (length >= 3) {
+        usbPacket[3] = data[2];
+    }
+    markDisplayMidiEvent(usbPacket);
+}
+
 static void markDisplayMidiEvent(const uint8_t* data)
 {
     midiEventsSeen++;
@@ -346,26 +268,17 @@ static void markDisplayMidiEvent(const uint8_t* data)
         const bool noteOn = (messageType == 0x90 && data2 > 0);
         noteEventsSeen++;
 
-        if (data1 < 128) {
-            if (noteOn && !activeNotes[data1]) {
-                activeNotes[data1] = true;
-                activeNotesCount++;
-            } else if (!noteOn && activeNotes[data1]) {
-                activeNotes[data1] = false;
-                if (activeNotesCount > 0) {
-                    activeNotesCount--;
-                }
-            }
-        }
+        bridgeUi.onNoteEvent(noteOn, data1, data2);
 
         snprintf(lastMidiText,
                  sizeof(lastMidiText),
                  "%s %s ch%u v%u",
                  noteOn ? "On" : "Off",
-                 noteName(data1, noteBuffer, sizeof(noteBuffer)),
+                 MidiCodec::noteName(data1, noteBuffer, sizeof(noteBuffer)),
                  channel,
                  data2);
     } else if (messageType == 0xB0) {
+        bridgeUi.onControlChange(data1, data2);
         snprintf(lastMidiText, sizeof(lastMidiText), "CC %u=%u ch%u", data1, data2, channel);
     } else if (messageType == 0xE0) {
         const uint16_t bend = (data1 & 0x7F) | ((data2 & 0x7F) << 7);
@@ -374,13 +287,14 @@ static void markDisplayMidiEvent(const uint8_t* data)
         snprintf(lastMidiText,
                  sizeof(lastMidiText),
                  "%s ch%u %u %u",
-                 statusName(status),
+                 MidiCodec::statusName(status),
                  channel,
                  data1,
                  data2);
     }
 
     lastMidiMs = millis();
+    bridgeUi.touchActivity(lastMidiMs);
     displayRefreshPending = true;
 }
 
@@ -401,71 +315,22 @@ static void drawStatusPill(int16_t x, int16_t y, const char* label, const char* 
     printDisplayLine(x + 8, y + 21, 2, border, value);
 }
 
-static void drawTypingCat(uint32_t nowMs, bool midiActive)
+static void tickBongoCat(uint32_t nowMs)
 {
-    const uint16_t fur = RGB565(226, 232, 232);
-    const uint16_t line = RGB565(48, 56, 64);
-    const uint16_t table = RGB565(96, 64, 40);
-    const uint16_t drum = midiActive ? RGB565_LIME : RGB565_CYAN;
-    const bool leftHit = midiActive && ((nowMs / 160) % 2 == 0);
-    const bool rightHit = midiActive && !leftHit;
-    const bool idleTap = !midiActive && ((nowMs / 900) % 2 == 0);
-    const bool blink = ((nowMs / 2600) % 5) == 0;
-
-    display->fillRect(18, 66, 204, 72, RGB565_BLACK);
-
-    // Table layer.
-    display->fillRoundRect(42, 116, 156, 16, 5, table);
-    display->drawFastHLine(48, 119, 144, RGB565(160, 104, 56));
-
-    // Body and head layer.
-    display->fillRoundRect(62, 92, 64, 40, 18, fur);
-    display->fillCircle(84, 82, 31, fur);
-    display->fillTriangle(60, 66, 68, 43, 78, 67, fur);
-    display->fillTriangle(90, 66, 103, 43, 108, 72, fur);
-    display->drawCircle(84, 82, 31, line);
-    display->drawLine(60, 66, 68, 43, line);
-    display->drawLine(68, 43, 78, 67, line);
-    display->drawLine(90, 66, 103, 43, line);
-    display->drawLine(103, 43, 108, 72, line);
-
-    if (blink) {
-        display->drawLine(72, 80, 78, 80, RGB565_BLACK);
-        display->drawLine(91, 80, 97, 80, RGB565_BLACK);
-    } else {
-        display->fillCircle(75, 80, 3, RGB565_BLACK);
-        display->fillCircle(94, 80, 3, RGB565_BLACK);
-    }
-    display->fillCircle(84, 89, 3, RGB565_DARKGRAY);
-    display->drawLine(84, 92, 78, 97, line);
-    display->drawLine(84, 92, 90, 97, line);
-    display->drawLine(57, 87, 43, 82, line);
-    display->drawLine(58, 92, 42, 92, line);
-    display->drawLine(58, 97, 43, 102, line);
-
-    // Bongo layer.
-    display->fillCircle(146, 109, 20, RGB565(32, 38, 48));
-    display->fillCircle(184, 109, 20, RGB565(32, 38, 48));
-    display->drawCircle(146, 109, 20, drum);
-    display->drawCircle(184, 109, 20, drum);
-    display->fillCircle(146, 109, 11, RGB565(20, 24, 32));
-    display->fillCircle(184, 109, 11, RGB565(20, 24, 32));
-
-    // Paw layer.
-    display->fillRoundRect(116, (leftHit || idleTap) ? 103 : 94, 32, 13, 7, fur);
-    display->fillRoundRect(168, rightHit ? 103 : 94, 32, 13, 7, fur);
-    display->drawRoundRect(116, (leftHit || idleTap) ? 103 : 94, 32, 13, 7, line);
-    display->drawRoundRect(168, rightHit ? 103 : 94, 32, 13, 7, line);
-
-    if (leftHit) {
-        display->drawCircle(146, 109, 24, RGB565_GOLD);
-    }
-    if (rightHit) {
-        display->drawCircle(184, 109, 24, RGB565_GOLD);
+    if (!displayReady) {
+        return;
     }
 
-    printDisplayLine(128, 72, 1, midiActive ? RGB565_LIME : RGB565_LIGHTGRAY,
-                     midiActive ? "bongo notes" : "idle");
+    static uint32_t lastCatDrawMs = 0;
+    if (nowMs - lastCatDrawMs < 40) {
+        return;
+    }
+    lastCatDrawMs = nowMs;
+
+    const bool midiActive = lastMidiMs > 0 && nowMs - lastMidiMs < 700;
+    bongoCat.update(nowMs, midiActive, noteEventsSeen);
+    bongoCat.draw(display);
+    bridgeUi.drawOverlays(nowMs);
 }
 
 static void updateDisplayDashboard(bool force)
@@ -485,41 +350,96 @@ static void updateDisplayDashboard(bool force)
     const bool usbConnected = usbMidi.isConnected();
     const bool bleConnected = bleMidi.isConnected();
     const uint32_t nowMs = millis();
-    const bool midiActive = lastMidiMs > 0 && nowMs - lastMidiMs < 700;
-
     if (!displayStaticDrawn || force) {
         display->fillScreen(RGB565_BLACK);
         display->fillRoundRect(6, 6, 228, 228, 10, RGB565(8, 16, 28));
         display->drawRoundRect(6, 6, 228, 228, 10, RGB565_CYAN);
         display->fillRoundRect(12, 12, 216, 216, 8, RGB565_BLACK);
-        printDisplayLine(22, 20, 2, RGB565_CYAN, "BONGO MIDI");
-        printDisplayLine(22, 44, 1, RGB565_GOLD, BLE_DEVICE_NAME);
+        printDisplayLine(22, 14, 2, RGB565_CYAN, "PIANO BLE");
+        printDisplayLine(22, 36, 1, RGB565_GOLD, bridgeSettings.bleDeviceName());
         displayStaticDrawn = true;
     }
 
-    drawTypingCat(nowMs, midiActive);
-    display->fillRect(18, 140, 204, 84, RGB565_BLACK);
-    drawStatusPill(20, 142, "Roland USB", usbConnected ? "OK" : "WAIT", usbConnected);
-    drawStatusPill(126, 142, "iPad BLE", bleConnected ? "OK" : "READY", bleConnected);
+    if (!bridgeUi.shouldDrawStatusPanel()) {
+        return;
+    }
+
+    const int16_t statusY = BongoCatDisplay::kStatusTop;
+    display->fillRect(18, statusY, 204, 240 - statusY - 12, RGB565_BLACK);
+    drawStatusPill(20, statusY + 8, "USB MIDI", usbConnected ? "OK" : "WAIT", usbConnected);
+    drawStatusPill(126, statusY + 8, "BLE", bleConnected ? "OK" : "READY", bleConnected);
+
+    if (usbConnected && usbMidi.getDeviceName().length() > 0) {
+        char keyboardLine[40] = {0};
+        snprintf(keyboardLine, sizeof(keyboardLine), "%.36s", usbMidi.getDeviceName().c_str());
+        printDisplayLine(22, statusY + 36, 1, RGB565_WHITE, keyboardLine);
+    }
+
+    const MidiBridge::Counters& midiStats = midiBridge.counters();
 
     char value[48] = {0};
-    snprintf(value, sizeof(value), "Notes %lu  Held %u", noteEventsSeen, activeNotesCount);
-    printDisplayLine(22, 190, 1, noteEventsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+    if (bridgeUi.shouldDrawFullMetrics()) {
+        snprintf(value, sizeof(value), "Notes %lu  Held %u", noteEventsSeen, bridgeUi.heldNoteCount());
+        printDisplayLine(22, statusY + 52, 1, noteEventsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
 
-    snprintf(value, sizeof(value), "Sent %lu  Skip %lu", blePacketsSent, blePacketsSkipped);
-    printDisplayLine(110, 190, 1, blePacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+        snprintf(value, sizeof(value), "%u/min  BLE %lu", bridgeUi.notesPerMinute(), midiStats.blePacketsSent);
+        printDisplayLine(110, statusY + 52, 1, midiStats.blePacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
 
-    printDisplayLine(22, 204, 1, lastMidiMs > 0 ? RGB565_WHITE : RGB565_DARKGRAY, lastMidiText);
+#if ENABLE_BLE_TO_USB
+        snprintf(value, sizeof(value), "In %lu out %lu/%lu", blePacketsReceived, usbPacketsSent, usbPacketsSkipped);
+        printDisplayLine(22, statusY + 64, 1, usbPacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+#else
+        if (bridgeSettings.transposeSemitones() != 0) {
+            snprintf(value, sizeof(value), "Transpose %+d", bridgeSettings.transposeSemitones());
+            printDisplayLine(22, statusY + 64, 1, RGB565_GOLD, value);
+        } else if (bridgeSettings.midiChannelFilter() > 0) {
+            snprintf(value, sizeof(value), "MIDI ch%u only", bridgeSettings.midiChannelFilter());
+            printDisplayLine(22, statusY + 64, 1, RGB565_GOLD, value);
+#if ENABLE_RTP_MIDI
+        } else if (networkServices.isSetupMode()) {
+            char wifiLine[40] = {0};
+            snprintf(wifiLine, sizeof(wifiLine), "Join %s", networkServices.setupApSsid());
+            printDisplayLine(22, statusY + 64, 1, RGB565_GOLD, wifiLine);
+        } else if (networkServices.isLanReady()) {
+            char rtpLine[40] = {0};
+#if ENABLE_OTA
+            if (networkServices.isOtaActive()) {
+                snprintf(rtpLine, sizeof(rtpLine), "OTA updating...");
+            } else {
+                snprintf(rtpLine, sizeof(rtpLine), "RTP %s", networkServices.localIpString());
+            }
+#else
+            snprintf(rtpLine, sizeof(rtpLine), "RTP %s", networkServices.localIpString());
+#endif
+            printDisplayLine(22, statusY + 64, 1, networkServices.hasRtpSession() ? RGB565_LIME : RGB565_GOLD, rtpLine);
+#endif
+        } else {
+            printDisplayLine(22, statusY + 64, 1, lastMidiMs > 0 ? RGB565_WHITE : RGB565_DARKGRAY, lastMidiText);
+        }
+#endif
+    }
 
     if (!usbConnected) {
-        printDisplayLine(22, 218, 1, RGB565_GOLD,
-                         usbMidi.getLastError().length() > 0 ? "Check Roland USB mode" : "Use HOST + power USB_DEV");
+        printDisplayLine(22, statusY + 88, 1, RGB565_GOLD,
+                         usbMidi.getLastError().length() > 0 ? "Check USB MIDI mode" : "Use HOST + power USB_DEV");
+#if ENABLE_RTP_MIDI
+    } else if (networkServices.isSetupMode()) {
+        printDisplayLine(22, statusY + 88, 1, RGB565_GOLD, "Open http://192.168.4.1");
+#endif
     } else if (midiEventsSeen == 0) {
-        printDisplayLine(22, 218, 1, RGB565_GOLD, "Press keys to test");
+        printDisplayLine(22, statusY + 88, 1, RGB565_GOLD, "Press keys to test");
     } else if (!bleConnected) {
-        printDisplayLine(22, 218, 1, RGB565_GOLD, "Connect app to BLE");
+        printDisplayLine(22, statusY + 88, 1, RGB565_GOLD, "Connect app to BLE");
+#if ENABLE_BLE_TO_USB
+    } else if (!usbMidi.canSend()) {
+        printDisplayLine(22, statusY + 88, 1, RGB565_GOLD, "USB IN only (no device OUT)");
+    } else if (blePacketsReceived == 0 && midiStats.blePacketsSent > 0) {
+        printDisplayLine(22, statusY + 88, 1, RGB565_LIME, "USB -> BLE OK");
+    } else if (usbPacketsSent > 0) {
+        printDisplayLine(22, statusY + 88, 1, RGB565_LIME, "Two-way MIDI active");
+#endif
     } else {
-        printDisplayLine(22, 218, 1, RGB565_LIME, "MIDI is flowing");
+        printDisplayLine(22, statusY + 88, 1, RGB565_LIME, "MIDI is flowing");
     }
 }
 
@@ -543,10 +463,22 @@ static void printStatusIfChanged()
 
     if (millis() - lastSummaryMs >= 10000) {
         lastSummaryMs = millis();
+        const MidiBridge::Counters& midiStats = midiBridge.counters();
+#if ENABLE_BLE_TO_USB
+        Serial.printf("[STATS] usb=%lu ble_sent=%lu ble_skipped=%lu ble_in=%lu usb_out=%lu/%lu can_send=%s\n",
+                      midiStats.usbPacketsSeen,
+                      midiStats.blePacketsSent,
+                      midiStats.blePacketsSkipped,
+                      blePacketsReceived,
+                      usbPacketsSent,
+                      usbPacketsSkipped,
+                      usbMidi.canSend() ? "yes" : "no");
+#else
         Serial.printf("[STATS] usb=%lu ble_sent=%lu ble_skipped=%lu\n",
-                      usbPacketsSeen,
-                      blePacketsSent,
-                      blePacketsSkipped);
+                      midiStats.usbPacketsSeen,
+                      midiStats.blePacketsSent,
+                      midiStats.blePacketsSkipped);
+#endif
         displayRefreshPending = true;
     }
 
@@ -557,7 +489,12 @@ void setup()
 {
     Serial.begin(SERIAL_BAUD);
     delay(1000);
+
+    bridgeSettings.begin(kDefaultBleName);
+    bridgeUi.applySavedDisplayMode(bridgeSettings.displayModeIndex());
+
     printStartupBanner();
+    bridgeSettings.printSummary();
     initDisplay();
     initBoardUsbHostPower();
 
@@ -567,7 +504,16 @@ void setup()
         Serial.println("[USB] Host init failed: " + usbMidi.getLastError());
     }
 
-    bleMidi.begin(BLE_DEVICE_NAME);
+    bleMidi.begin(bridgeSettings.bleDeviceName());
+    bridgeUi.setBle(&bleMidi);
+    midiBridge.begin(&bleMidi, &bridgeSettings, &bridgeUi);
+#if ENABLE_RTP_MIDI
+    networkServices.begin(RTP_MIDI_SESSION_NAME, bridgeSettings.bleDeviceName());
+    midiBridge.setNetwork(&networkServices);
+#endif
+#if ENABLE_BLE_TO_USB
+    bleMidi.setMidiMessageCallback(onBleMidiReceived);
+#endif
     Serial.println("[BLE] MIDI server advertising.");
 }
 
@@ -575,6 +521,12 @@ void loop()
 {
     usbMidi.task();
     bleMidi.task();
+#if ENABLE_RTP_MIDI
+    networkServices.task();
+#endif
+    const uint32_t nowMs = millis();
+    bridgeUi.tick(nowMs);
+    tickBongoCat(nowMs);
     printStatusIfChanged();
     delayMicroseconds(50);
 }

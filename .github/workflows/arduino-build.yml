@@ -23,13 +23,24 @@ jobs:
 
       - name: Install libraries
         run: |
-          arduino-cli lib install FastLED "USB Host Shield Library 2.0" "GFX Library for Arduino"
+          arduino-cli lib install "USB Host Shield Library 2.0" "GFX Library for Arduino" AppleMIDI
 
       - name: Compile ESP32-S3 USB host bridge
         run: |
           arduino-cli compile \
+            --output-dir build-s3 \
             --fqbn 'esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc' \
             ./USB-MIDI-BLE-Bridge
+
+      - name: Upload S3 firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: USB-MIDI-BLE-Bridge-esp32s3
+          path: |
+            build-s3/USB-MIDI-BLE-Bridge.ino.bin
+            build-s3/USB-MIDI-BLE-Bridge.ino.bootloader.bin
+            build-s3/USB-MIDI-BLE-Bridge.ino.partitions.bin
+          if-no-files-found: error
 
       - name: Compile classic ESP32 MAX3421E fallback
         run: |

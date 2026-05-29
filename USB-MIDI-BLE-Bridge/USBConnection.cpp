@@ -5,6 +5,64 @@
 
 #include "USBConnection.h"
 #include <string.h>
+#include <usb/usb_helpers.h>
+
+namespace {
+
+String utf16DescriptorToAscii(const usb_str_desc_t* desc)
+{
+    if (desc == nullptr || desc->bLength < 2) {
+        return String();
+    }
+
+    const uint8_t charCount = (desc->bLength - 2) / 2;
+    String out;
+    out.reserve(charCount);
+    for (uint8_t i = 0; i < charCount; i++) {
+        const char c = static_cast<char>(desc->wData[i] & 0xFF);
+        if (c == '\0') {
+            break;
+        }
+        out += c;
+    }
+    return out;
+}
+
+}  // namespace
+
+#ifndef DEBUG_USB
+#define DEBUG_USB 0
+#endif
+
+#if DEBUG_USB
+#define USB_LOG(...) Serial.printf(__VA_ARGS__)
+#define USB_LOG_LN(msg) Serial.println(msg)
+#else
+#define USB_LOG(...) ((void)0)
+#define USB_LOG_LN(msg) ((void)0)
+#endif
+
+void USBConnection::loadDeviceName()
+{
+    deviceName = "";
+    if (deviceHandle == nullptr) {
+        return;
+    }
+
+    usb_device_info_t devInfo = {};
+    if (usb_host_device_info(deviceHandle, &devInfo) != ESP_OK) {
+        return;
+    }
+
+    deviceName = utf16DescriptorToAscii(devInfo.str_desc_product);
+    if (deviceName.length() == 0) {
+        deviceName = utf16DescriptorToAscii(devInfo.str_desc_manufacturer);
+    }
+
+    if (deviceName.length() > 0) {
+        USB_LOG("[USB] Device name: %s\n", deviceName.c_str());
+    }
+}
 
 USBConnection::USBConnection()
   : isReady(false),
@@ -14,17 +72,18 @@ USBConnection::USBConnection()
     deviceHandle(nullptr),
     eventFlags(0),
     midiTransfer(nullptr),
+    outTransfer(nullptr),
+    outTransferBusy(false),
     queueHead(0),
     queueTail(0),
     queueMux(portMUX_INITIALIZER_UNLOCKED),
     firstMidiReceived(false),
     isMidiDeviceConfirmed(false),
+    midiInterfaceNumber(-1),
     deviceName(""),
     lastError(""),
     usbTaskHandle(nullptr),
-    transferInFlight(false),
-    enumRetryPending(false),
-    enumRetryTime(0)
+    transferInFlight(false)
 {
 }
 
@@ -73,6 +132,44 @@ void USBConnection::onDeviceConnected() {
 
 void USBConnection::onDeviceDisconnected() {
     // Default implementation (empty).
+}
+
+void USBConnection::handleDeviceRemoved()
+{
+    isReady = false;
+    transferInFlight = false;
+    outTransferBusy = false;
+
+    if (midiTransfer) {
+        usb_host_transfer_free(midiTransfer);
+        midiTransfer = nullptr;
+    }
+    if (outTransfer) {
+        usb_host_transfer_free(outTransfer);
+        outTransfer = nullptr;
+    }
+
+    if (deviceHandle != nullptr) {
+        if (midiInterfaceNumber >= 0) {
+            usb_host_interface_release(clientHandle, deviceHandle, static_cast<uint8_t>(midiInterfaceNumber));
+            midiInterfaceNumber = -1;
+        }
+        usb_host_device_close(clientHandle, deviceHandle);
+        deviceHandle = nullptr;
+    }
+
+    portENTER_CRITICAL(&queueMux);
+    queueHead = 0;
+    queueTail = 0;
+    portEXIT_CRITICAL(&queueMux);
+
+    deviceName = "";
+    firstMidiReceived = false;
+    isMidiDeviceConfirmed = false;
+    lastError = "";
+
+    Serial.println("[USB] Keyboard unplugged — plug in again (BLE stays up)");
+    onDeviceDisconnected();
 }
 
 void USBConnection::onMidiDataReceived(const uint8_t* data, size_t length) {
@@ -136,22 +233,13 @@ void USBConnection::_usbTask(void* arg) {
         
         // When all devices are gone, free them so new connections can be accepted
         if (usbCon->eventFlags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            Serial.println("[USB] All devices free, ready for reconnect.");
+            USB_LOG_LN("[USB] All devices free, ready for reconnect.");
         }
         if (usbCon->eventFlags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
             usb_host_device_free_all();
         }
 
         usb_host_client_handle_events(usbCon->clientHandle, 1);
-
-        // Handle non-blocking enum retry
-        if (usbCon->enumRetryPending && millis() > usbCon->enumRetryTime) {
-            usbCon->enumRetryPending = false;
-            if (usbCon->midiTransfer && !usbCon->transferInFlight) {
-                usbCon->transferInFlight = true;
-                usb_host_transfer_submit(usbCon->midiTransfer);
-            }
-        }
 
         vTaskDelay(1);
     }
@@ -160,7 +248,7 @@ void USBConnection::_usbTask(void* arg) {
 // ---------- Internal Callbacks ----------
 
 void USBConnection::_clientEventCallback(const usb_host_client_event_msg_t *eventMsg, void *arg) {
-    Serial.printf("[USB] Client event: %d\n", eventMsg->event);  // DEBUG
+    USB_LOG("[USB] Client event: %d\n", eventMsg->event);
     USBConnection *usbCon = static_cast<USBConnection*>(arg);
     esp_err_t err;
     switch (eventMsg->event) {
@@ -170,6 +258,7 @@ void USBConnection::_clientEventCallback(const usb_host_client_event_msg_t *even
                 usbCon->lastError = "Device open failed (err=" + String(err) + ")";
                 return;
             }
+            usbCon->loadDeviceName();
             {
                 const usb_config_desc_t *config_desc;
                 err = usb_host_get_active_config_descriptor(usbCon->deviceHandle, &config_desc);
@@ -187,15 +276,7 @@ void USBConnection::_clientEventCallback(const usb_host_client_event_msg_t *even
             }
             break;
         case USB_HOST_CLIENT_EVENT_DEV_GONE:
-            usbCon->isReady = false;
-            usbCon->transferInFlight = false;
-            if (usbCon->midiTransfer) {
-                usb_host_transfer_free(usbCon->midiTransfer);
-                usbCon->midiTransfer = nullptr;
-            }
-            Serial.println("[USB] Device gone - rebooting...");
-            delay(500); // let serial flush
-            ESP.restart();
+            usbCon->handleDeviceRemoved();
             break;
     }
 }
@@ -215,6 +296,67 @@ void USBConnection::_onReceive(usb_transfer_t *transfer) {
     if (usbCon->isReady && !usbCon->transferInFlight) {
         usbCon->transferInFlight = true;
         usb_host_transfer_submit(transfer);
+    }
+}
+
+static uint8_t midiStatusToCin(uint8_t status)
+{
+    if (status >= 0x80 && status <= 0xEF) {
+        return status >> 4;
+    }
+
+    switch (status) {
+        case 0xF0: return 0x04;
+        case 0xF1: return 0x02;
+        case 0xF2: return 0x03;
+        case 0xF3: return 0x02;
+        case 0xF6: return 0x05;
+        case 0xF7: return 0x05;
+        case 0xF8:
+        case 0xFA:
+        case 0xFB:
+        case 0xFC:
+        case 0xFE:
+        case 0xFF:
+            return 0x0F;
+        default:
+            return 0;
+    }
+}
+
+bool USBConnection::sendMidiMessage(const uint8_t* data, size_t length)
+{
+    if (!isReady || outTransfer == nullptr || outTransferBusy || data == nullptr || length == 0) {
+        return false;
+    }
+
+    const uint8_t cin = midiStatusToCin(data[0]);
+    if (cin == 0) {
+        return false;
+    }
+
+    uint8_t packet[4] = {cin, 0, 0, 0};
+    for (size_t i = 0; i < length && i < 3; i++) {
+        packet[i + 1] = data[i];
+    }
+
+    memcpy(outTransfer->data_buffer, packet, 4);
+    outTransfer->num_bytes = 4;
+    outTransferBusy = true;
+
+    esp_err_t err = usb_host_transfer_submit(outTransfer);
+    if (err != ESP_OK) {
+        outTransferBusy = false;
+    }
+
+    return err == ESP_OK;
+}
+
+void USBConnection::_onSendComplete(usb_transfer_t *transfer)
+{
+    USBConnection *usbCon = static_cast<USBConnection*>(transfer->context);
+    if (usbCon != nullptr) {
+        usbCon->outTransferBusy = false;
     }
 }
 
@@ -243,7 +385,9 @@ void USBConnection::_processConfig(const usb_config_desc_t *config_desc) {
             if (bInterfaceClass == 0x01 && bInterfaceSubClass == 0x03) {
                 esp_err_t err = usb_host_interface_claim(clientHandle, deviceHandle, bInterfaceNumber, bAlternateSetting);
                 if (err == ESP_OK) {
+                    midiInterfaceNumber = static_cast<int8_t>(bInterfaceNumber);
                     uint16_t idx2 = index + len;
+                    bool inReady = false;
                     while (idx2 < totalLength) {
                         if (idx2 + 1 >= totalLength) break;
                         uint8_t len2 = p[idx2];
@@ -258,7 +402,7 @@ void USBConnection::_processConfig(const usb_config_desc_t *config_desc) {
                                 uint8_t bInterval = p[idx2 + 6];
                                 if (wMaxPacketSize > 512) wMaxPacketSize = 512;
                                 if (wMaxPacketSize == 0) wMaxPacketSize = 64;
-                                if ((bEndpointAddress & 0x80) && ((bmAttributes & 0x03) == 0x02)) {
+                                if ((bmAttributes & 0x03) == 0x02 && (bEndpointAddress & 0x80)) {
                                     uint32_t timeout = 3000;
                                     esp_err_t e2 = usb_host_transfer_alloc(wMaxPacketSize, timeout, &midiTransfer);
                                     if (e2 == ESP_OK && midiTransfer != nullptr) {
@@ -270,19 +414,33 @@ void USBConnection::_processConfig(const usb_config_desc_t *config_desc) {
                                         interval = (bInterval == 0) ? 1 : bInterval;
                                         isReady = true;
                                         claimedOk = true;
+                                        inReady = true;
                                         transferInFlight = true;
-                                        vTaskDelay(pdMS_TO_TICKS(200));
-                                        usb_host_transfer_submit(midiTransfer);
-                                        return;
                                     } else {
                                         lastError = "MIDI IN transfer allocation failed (err=" + String(e2) + ")";
+                                    }
+                                } else if ((bmAttributes & 0x03) == 0x02 && !(bEndpointAddress & 0x80)) {
+                                    esp_err_t e2 = usb_host_transfer_alloc(wMaxPacketSize, 3000, &outTransfer);
+                                    if (e2 == ESP_OK && outTransfer != nullptr) {
+                                        outTransfer->device_handle = deviceHandle;
+                                        outTransfer->bEndpointAddress = bEndpointAddress;
+                                        outTransfer->callback = _onSendComplete;
+                                        outTransfer->context = this;
+                                        outTransfer->num_bytes = wMaxPacketSize;
                                     }
                                 }
                             }
                         }
                         idx2 += len2;
                     }
-                    usb_host_interface_release(clientHandle, deviceHandle, bInterfaceNumber);
+                    if (inReady) {
+                        vTaskDelay(pdMS_TO_TICKS(200));
+                        usb_host_transfer_submit(midiTransfer);
+                        return;
+                    } else {
+                        usb_host_interface_release(clientHandle, deviceHandle, bInterfaceNumber);
+                        midiInterfaceNumber = -1;
+                    }
                 }
             }
         }

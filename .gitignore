@@ -17,7 +17,11 @@ CLAUDE.md
 /MIDI_PCM5102A_Handler.cpp
 /ESP32_PCM5102A_MIDI.h
 /ESP32_PCM5102A_MIDI.cpp
-/src/src.ino
+/build-s3/
 
 # Internal research docs
 docs/
+
+# Local Wi-Fi credentials for optional RTP-MIDI builds
+USB-MIDI-BLE-Bridge/wifi_secrets.h
+USB-MIDI-BLE-Bridge/ota_secrets.h

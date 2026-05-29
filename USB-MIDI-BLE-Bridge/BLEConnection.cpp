@@ -1,12 +1,81 @@
 #include "BLEConnection.h"
 #include <BLE2902.h>
 
+#include "MidiCodec.h"
+
+static bool isMidiStatusByte(uint8_t byte, size_t remaining)
+{
+    if (byte < 0x80) {
+        return false;
+    }
+
+    const uint8_t msgLen = MidiCodec::lengthFromStatus(byte);
+    return msgLen > 0 && remaining >= msgLen;
+}
+
+static bool isLikelyTimestampByte(uint8_t byte, size_t pos, size_t len, const uint8_t* data)
+{
+    if (!(byte & 0x80) || byte >= 0xF8) {
+        return false;
+    }
+
+    if (byte > 0xBF) {
+        return true;
+    }
+
+    if (pos + 1 >= len) {
+        return true;
+    }
+
+    return isMidiStatusByte(data[pos + 1], len - pos - 1);
+}
+
+void BLEConnection::processIncomingBlePacket(const uint8_t* data, size_t length)
+{
+    size_t i = 0;
+
+    if (i < length && isLikelyTimestampByte(data[i], i, length, data)) {
+        i++;
+        if (i < length && (data[i] & 0x80) && isLikelyTimestampByte(data[i], i, length, data)) {
+            i++;
+        }
+    }
+
+    while (i < length) {
+        while (i < length && isLikelyTimestampByte(data[i], i, length, data)) {
+            i++;
+        }
+
+        if (i >= length) {
+            break;
+        }
+
+        const uint8_t status = data[i];
+        if (!(status & 0x80)) {
+            i++;
+            continue;
+        }
+
+        const uint8_t msgLen = MidiCodec::lengthFromStatus(status);
+        if (msgLen == 0 || i + msgLen > length) {
+            break;
+        }
+
+        if (midiCallback) {
+            midiCallback(data + i, msgLen);
+        }
+        onMidiDataReceived(data + i, msgLen);
+        i += msgLen;
+    }
+}
+
 BLEConnection::BLEConnection()
     : pServer(nullptr),
       pCharacteristic(nullptr),
       pBleCallback(nullptr),
       sendMutex(nullptr),
-      midiCallback(nullptr)
+      midiCallback(nullptr),
+      avgLatencyMs_(0)
 {
 }
 
@@ -28,8 +97,8 @@ void BLEConnection::begin(const std::string& deviceName) {
     BLEDevice::init(String(deviceName.c_str()));
     pServer = BLEDevice::createServer();
     class ServerCallbacks : public BLEServerCallbacks {
-    void onDisconnect(BLEServer* pServer) override {
-        BLEDevice::startAdvertising();
+        void onDisconnect(BLEServer* pServer) override {
+            BLEDevice::startAdvertising();
         }
     };
     pServer->setCallbacks(new ServerCallbacks());
@@ -39,34 +108,24 @@ void BLEConnection::begin(const std::string& deviceName) {
         BLE_MIDI_CHARACTERISTIC_UUID,
         BLECharacteristic::PROPERTY_READ |
         BLECharacteristic::PROPERTY_WRITE_NR |
-        BLECharacteristic::PROPERTY_NOTIFY    
-    ); // Added notify
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
 
-    // Explicit CCCD descriptor keeps notify subscription reliable on iOS/macOS.
     pCharacteristic->addDescriptor(new BLE2902());
 
-
-    // Create a write callback that extracts the first 4 bytes and forwards them.
     class BLECallback : public BLECharacteristicCallbacks {
     public:
         BLEConnection* bleCon;
         BLECallback(BLEConnection* con) : bleCon(con) {}
         void onWrite(BLECharacteristic* characteristic) override {
             auto rxValue = characteristic->getValue();
-            // If at least 4 bytes are available, extract the first 4.
-            if(rxValue.length() >= 4) {
+            if (rxValue.length() >= 2) {
                 const uint8_t* data = reinterpret_cast<const uint8_t*>(rxValue.c_str());
-                // Invoke the user-defined callback (if set).
-                if(bleCon->midiCallback) {
-                    bleCon->midiCallback(data, 4);
-                }
-                // Also invoke the virtual callback so subclasses can override.
-                bleCon->onMidiDataReceived(data, 4);
+                bleCon->processIncomingBlePacket(data, rxValue.length());
             }
         }
     };
 
-    // Store the pointer for cleanup in the destructor
     delete pBleCallback;
     pBleCallback = new BLECallback(this);
     pCharacteristic->setCallbacks(pBleCallback);
@@ -74,21 +133,18 @@ void BLEConnection::begin(const std::string& deviceName) {
 
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(BLE_MIDI_SERVICE_UUID);
-    // Keep the 128-bit BLE MIDI UUID in the advertisement and let the name
-    // move to scan response if the payload gets tight on newer ESP32 cores.
     pAdvertising->setScanResponse(true);
     BLEDevice::startAdvertising();
 }
 
-    // New send MIDI function
 bool BLEConnection::sendMidi(const uint8_t* data, size_t length) {
     if (!pCharacteristic || !sendMutex || length == 0) return false;
     if (xSemaphoreTake(sendMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
 
     bool sent = false;
     if (isConnected()) {
-    pCharacteristic->setValue(const_cast<uint8_t*>(data), length);
-    pCharacteristic->notify();
+        pCharacteristic->setValue(const_cast<uint8_t*>(data), length);
+        pCharacteristic->notify();
         sent = true;
     }
 
@@ -96,9 +152,16 @@ bool BLEConnection::sendMidi(const uint8_t* data, size_t length) {
     return sent;
 }
 
-void BLEConnection::task() {
-    // BLE generally does not require periodic processing.
+void BLEConnection::recordForwardLatency(uint32_t latencyMs)
+{
+    if (avgLatencyMs_ == 0) {
+        avgLatencyMs_ = static_cast<uint16_t>(latencyMs);
+    } else {
+        avgLatencyMs_ = static_cast<uint16_t>((avgLatencyMs_ * 3 + latencyMs) / 4);
+    }
 }
+
+void BLEConnection::task() {}
 
 bool BLEConnection::isConnected() const {
     if(pServer)

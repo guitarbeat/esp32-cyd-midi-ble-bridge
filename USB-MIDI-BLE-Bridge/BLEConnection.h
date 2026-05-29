@@ -33,11 +33,16 @@ public:
     // Returns whether a BLE device is currently connected.
     bool isConnected() const;
 
+    uint16_t getAverageLatencyMs() const { return avgLatencyMs_; }
+    void recordForwardLatency(uint32_t latencyMs);
+
     // Sends a MIDI message out over BLE notify
     bool sendMidi(const uint8_t* data, size_t length);
 
     // Registers a callback to handle incoming BLE MIDI messages.
     void setMidiMessageCallback(MIDIMessageCallback cb);
+
+    void processIncomingBlePacket(const uint8_t* data, size_t length);
 
     // Virtual callback invoked when a BLE MIDI message (4 bytes) is received.
     // Upper layer or subclass should override this method.
@@ -49,6 +54,7 @@ protected:
     BLECharacteristicCallbacks* pBleCallback;  // Managed to prevent memory leak
     SemaphoreHandle_t sendMutex;
     MIDIMessageCallback midiCallback;
+    uint16_t avgLatencyMs_;
 };
 
 #endif // BLE_CONNECTION_H
