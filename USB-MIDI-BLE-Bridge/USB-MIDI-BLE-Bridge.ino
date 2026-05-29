@@ -88,11 +88,15 @@ static Arduino_GFX* display = new Arduino_ST7789(
 BLEConnection bleMidi;
 
 static uint32_t usbPacketsSeen = 0;
+static uint32_t midiEventsSeen = 0;
+static uint32_t noteEventsSeen = 0;
 static uint32_t blePacketsSent = 0;
 static uint32_t blePacketsSkipped = 0;
 static bool displayReady = false;
 static uint32_t lastMidiMs = 0;
-static char lastMidiText[32] = "none";
+static char lastMidiText[36] = "none";
+static bool activeNotes[128] = {false};
+static uint8_t activeNotesCount = 0;
 static bool displayRefreshPending = true;
 static bool displayStaticDrawn = false;
 
@@ -187,6 +191,14 @@ static const char* statusName(uint8_t status)
         case 0xE0: return "PitchBend";
         default: return "System";
     }
+}
+
+static const char* noteName(uint8_t note, char* buffer, size_t bufferLength)
+{
+    static const char* names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    const int octave = (note / 12) - 1;
+    snprintf(buffer, bufferLength, "%s%d", names[note % 12], octave);
+    return buffer;
 }
 
 static void updateDisplayDashboard(bool force = false);
@@ -321,13 +333,53 @@ static void updateDisplayStatus(bool usbConnected, bool bleConnected)
 
 static void markDisplayMidiEvent(const uint8_t* data)
 {
-    snprintf(lastMidiText,
-             sizeof(lastMidiText),
-             "%s ch%u %u %u",
-             statusName(data[1]),
-             (data[1] & 0x0F) + 1,
-             data[2],
-             data[3]);
+    midiEventsSeen++;
+
+    const uint8_t status = data[1];
+    const uint8_t messageType = status & 0xF0;
+    const uint8_t channel = (status & 0x0F) + 1;
+    const uint8_t data1 = data[2];
+    const uint8_t data2 = data[3];
+    char noteBuffer[6] = {0};
+
+    if ((messageType == 0x90 && data2 > 0) || messageType == 0x80 || (messageType == 0x90 && data2 == 0)) {
+        const bool noteOn = (messageType == 0x90 && data2 > 0);
+        noteEventsSeen++;
+
+        if (data1 < 128) {
+            if (noteOn && !activeNotes[data1]) {
+                activeNotes[data1] = true;
+                activeNotesCount++;
+            } else if (!noteOn && activeNotes[data1]) {
+                activeNotes[data1] = false;
+                if (activeNotesCount > 0) {
+                    activeNotesCount--;
+                }
+            }
+        }
+
+        snprintf(lastMidiText,
+                 sizeof(lastMidiText),
+                 "%s %s ch%u v%u",
+                 noteOn ? "On" : "Off",
+                 noteName(data1, noteBuffer, sizeof(noteBuffer)),
+                 channel,
+                 data2);
+    } else if (messageType == 0xB0) {
+        snprintf(lastMidiText, sizeof(lastMidiText), "CC %u=%u ch%u", data1, data2, channel);
+    } else if (messageType == 0xE0) {
+        const uint16_t bend = (data1 & 0x7F) | ((data2 & 0x7F) << 7);
+        snprintf(lastMidiText, sizeof(lastMidiText), "Bend %u ch%u", bend, channel);
+    } else {
+        snprintf(lastMidiText,
+                 sizeof(lastMidiText),
+                 "%s ch%u %u %u",
+                 statusName(status),
+                 channel,
+                 data1,
+                 data2);
+    }
+
     lastMidiMs = millis();
     displayRefreshPending = true;
 }
@@ -451,8 +503,8 @@ static void updateDisplayDashboard(bool force)
     drawStatusPill(126, 142, "iPad BLE", bleConnected ? "OK" : "READY", bleConnected);
 
     char value[48] = {0};
-    snprintf(value, sizeof(value), "Notes %lu", usbPacketsSeen);
-    printDisplayLine(22, 190, 1, usbPacketsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
+    snprintf(value, sizeof(value), "Notes %lu  Held %u", noteEventsSeen, activeNotesCount);
+    printDisplayLine(22, 190, 1, noteEventsSeen > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
 
     snprintf(value, sizeof(value), "Sent %lu  Skip %lu", blePacketsSent, blePacketsSkipped);
     printDisplayLine(110, 190, 1, blePacketsSent > 0 ? RGB565_LIME : RGB565_LIGHTGRAY, value);
@@ -462,7 +514,7 @@ static void updateDisplayDashboard(bool force)
     if (!usbConnected) {
         printDisplayLine(22, 218, 1, RGB565_GOLD,
                          usbMidi.getLastError().length() > 0 ? "Check Roland USB mode" : "Use HOST + power USB_DEV");
-    } else if (usbPacketsSeen == 0) {
+    } else if (midiEventsSeen == 0) {
         printDisplayLine(22, 218, 1, RGB565_GOLD, "Press keys to test");
     } else if (!bleConnected) {
         printDisplayLine(22, 218, 1, RGB565_GOLD, "Connect app to BLE");

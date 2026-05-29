@@ -47,6 +47,7 @@ protected:
     BLEServer* pServer;
     BLECharacteristic* pCharacteristic;
     BLECharacteristicCallbacks* pBleCallback;  // Managed to prevent memory leak
+    SemaphoreHandle_t sendMutex;
     MIDIMessageCallback midiCallback;
 };
 

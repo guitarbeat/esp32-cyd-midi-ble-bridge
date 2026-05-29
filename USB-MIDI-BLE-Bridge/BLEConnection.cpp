@@ -1,16 +1,30 @@
 #include "BLEConnection.h"
+#include <BLE2902.h>
 
 BLEConnection::BLEConnection()
-    : pServer(nullptr), pCharacteristic(nullptr), pBleCallback(nullptr), midiCallback(nullptr)
+    : pServer(nullptr),
+      pCharacteristic(nullptr),
+      pBleCallback(nullptr),
+      sendMutex(nullptr),
+      midiCallback(nullptr)
 {
 }
 
 BLEConnection::~BLEConnection() {
+    if (sendMutex) {
+        vSemaphoreDelete(sendMutex);
+        sendMutex = nullptr;
+    }
     delete pBleCallback;
     pBleCallback = nullptr;
 }
 
 void BLEConnection::begin(const std::string& deviceName) {
+    if (pServer) {
+        return;
+    }
+
+    sendMutex = xSemaphoreCreateMutex();
     BLEDevice::init(String(deviceName.c_str()));
     pServer = BLEDevice::createServer();
     class ServerCallbacks : public BLEServerCallbacks {
@@ -28,9 +42,8 @@ void BLEConnection::begin(const std::string& deviceName) {
         BLECharacteristic::PROPERTY_NOTIFY    
     ); // Added notify
 
-    // This descriptor is required for notify to work
-    BLEDescriptor *pCCCD = new BLEDescriptor(BLEUUID((uint16_t)0x2902));
-    pCharacteristic->addDescriptor(pCCCD);
+    // Explicit CCCD descriptor keeps notify subscription reliable on iOS/macOS.
+    pCharacteristic->addDescriptor(new BLE2902());
 
 
     // Create a write callback that extracts the first 4 bytes and forwards them.
@@ -61,16 +74,26 @@ void BLEConnection::begin(const std::string& deviceName) {
 
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(BLE_MIDI_SERVICE_UUID);
-    pAdvertising->setScanResponse(false);
+    // Keep the 128-bit BLE MIDI UUID in the advertisement and let the name
+    // move to scan response if the payload gets tight on newer ESP32 cores.
+    pAdvertising->setScanResponse(true);
     BLEDevice::startAdvertising();
 }
 
     // New send MIDI function
 bool BLEConnection::sendMidi(const uint8_t* data, size_t length) {
-    if (!pCharacteristic || !isConnected()) return false;
+    if (!pCharacteristic || !sendMutex || length == 0) return false;
+    if (xSemaphoreTake(sendMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+
+    bool sent = false;
+    if (isConnected()) {
     pCharacteristic->setValue(const_cast<uint8_t*>(data), length);
     pCharacteristic->notify();
-    return true;
+        sent = true;
+    }
+
+    xSemaphoreGive(sendMutex);
+    return sent;
 }
 
 void BLEConnection::task() {
