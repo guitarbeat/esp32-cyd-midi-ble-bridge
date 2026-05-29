@@ -299,16 +299,38 @@ void USBConnection::_onReceive(usb_transfer_t *transfer) {
     usbCon->transferInFlight = false;
 
     if (transfer->status == 0 && transfer->actual_num_bytes >= 4) {
+        // USB MIDI packets are always 4 bytes. 
+        // A single bulk transfer may contain multiple 4-byte packets.
         for (int offset = 0; offset + 4 <= transfer->actual_num_bytes; offset += 4) {
-            if (transfer->data_buffer[offset] == 0x00) continue;
-            if (transfer->data_buffer[offset + 1] == 0xFE) continue;
-            usbCon->enqueueMidiMessage(transfer->data_buffer + offset, 4);
+            const uint8_t cin = transfer->data_buffer[offset] & 0x0F;
+            const uint8_t status = transfer->data_buffer[offset + 1];
+            
+            // Filter out Active Sensing (0xFE) to save BLE bandwidth.
+            // Roland pianos send this every 300ms.
+            if (status == 0xFE) continue;
+            
+            // CIN 0x0 is "Reserved" or "Invalid" in most MIDI 1.0 cases
+            if (cin == 0x00 && status == 0x00) continue;
+
+            if (usbCon->enqueueMidiMessage(transfer->data_buffer + offset, 4)) {
+                if (!usbCon->firstMidiReceived) {
+                    usbCon->firstMidiReceived = true;
+                    Serial.printf("[USB] First MIDI data received (status=0x%02X)\n", status);
+                }
+            }
         }
+    } else if (transfer->status != 0) {
+        USB_LOG("[USB] Transfer error: %d\n", transfer->status);
     }
 
-    if (usbCon->isReady && !usbCon->transferInFlight) {
+    // Always re-submit the transfer to keep the pipe open
+    if (usbCon->isReady) {
         usbCon->transferInFlight = true;
-        usb_host_transfer_submit(transfer);
+        esp_err_t err = usb_host_transfer_submit(transfer);
+        if (err != ESP_OK) {
+            usbCon->transferInFlight = false;
+            USB_LOG("[USB] Transfer re-submit failed: %d\n", err);
+        }
     }
 }
 
@@ -402,9 +424,15 @@ void USBConnection::_processConfig(const usb_config_desc_t *config_desc) {
                           bInterfaceNumber, bInterfaceClass, bInterfaceSubClass, bNumEndpoints);
 
             // MIDI Class is 0x01 (Audio), SubClass 0x03 (MIDI Streaming)
-            // Some devices might report Class 0xFF (Vendor Specific) but still work as MIDI
-            if ((bInterfaceClass == 0x01 && bInterfaceSubClass == 0x03) || 
-                (bInterfaceClass == 0xFF && bNumEndpoints >= 1)) {
+            // Roland/Yamaha Vendor Mode often uses Class 0xFF or Class 0x01 with SubClass 0x00/0xFF
+            bool isMidiCandidate = (bInterfaceClass == 0x01 && bInterfaceSubClass == 0x03) || 
+                                   (bInterfaceClass == 0x01 && bInterfaceSubClass == 0x00) ||
+                                   (bInterfaceClass == 0xFF && bNumEndpoints >= 1);
+            
+            if (isMidiCandidate) {
+                if (bInterfaceClass == 0xFF) {
+                    Serial.println("[USB] Warning: Device is in VENDOR mode (Class 0xFF). Roland pianos MUST be in 'Generic' mode for this bridge.");
+                }
                 
                 Serial.printf("[USB] Attempting to claim interface %d...\n", bInterfaceNumber);
                 esp_err_t err = usb_host_interface_claim(clientHandle, deviceHandle, bInterfaceNumber, bAlternateSetting);

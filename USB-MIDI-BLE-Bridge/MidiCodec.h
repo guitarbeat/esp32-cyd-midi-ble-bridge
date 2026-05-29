@@ -43,31 +43,34 @@ inline uint8_t lengthFromStatus(uint8_t status)
 inline uint8_t lengthFromUsbCin(uint8_t cin, uint8_t status)
 {
     switch (cin & 0x0F) {
-        case 0x2:
+        case 0x0: // Reserved
+        case 0x1: // Reserved
+            return 0;
+        case 0x2: // Two-byte System Common (e.g. MTC, SongSelect)
             return 2;
-        case 0x3:
+        case 0x3: // Three-byte System Common (e.g. SongPos)
             return 3;
-        case 0x4:
+        case 0x4: // SysEx starts or continues
             return 3;
-        case 0x5:
+        case 0x5: // Single-byte System Common or SysEx ends with one byte
             return 1;
-        case 0x6:
+        case 0x6: // SysEx ends with two bytes
             return 2;
-        case 0x7:
+        case 0x7: // SysEx ends with three bytes
             return 3;
-        case 0x8:
-        case 0x9:
-        case 0xA:
-        case 0xB:
-        case 0xE:
+        case 0x8: // Note-off
+        case 0x9: // Note-on
+        case 0xA: // Poly-KeyPress
+        case 0xB: // Control Change
+        case 0xE: // Pitch Bend
             return 3;
-        case 0xC:
-        case 0xD:
+        case 0xC: // Program Change
+        case 0xD: // Channel Pressure
             return 2;
-        case 0xF:
+        case 0xF: // Single Byte
             return 1;
         default:
-            return lengthFromStatus(status);
+            return 0;
     }
 }
 
