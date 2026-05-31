@@ -69,9 +69,6 @@ bool RTPMidiConnection::begin(const char* sessionName)
     AppleNetworkMidi.setHandleDisconnected(onRtpDisconnectedCb);
 
     wifiProvisioning.begin(sessionName);
-    Serial.printf("[RTP] In Audio MIDI Setup, add device \"%s\" at port %u after WiFi connects\n",
-                  sessionName != nullptr && sessionName[0] != '\0' ? sessionName : RTP_MIDI_SESSION_NAME,
-                  AppleNetworkMidi.getPort());
     return true;
 #endif
 }
@@ -100,72 +97,28 @@ void RTPMidiConnection::task()
         wifiState_ = WifiState::kOff;
         rtpStarted_ = false;
         rtpPeers_ = 0;
-        strncpy(ipString_, wifiProvisioning.localIpString(), sizeof(ipString_) - 1);
-        ipString_[sizeof(ipString_) - 1] = '\0';
     }
 #endif
 }
 
-bool RTPMidiConnection::isWifiConnected() const
-{
-#if !ENABLE_RTP_MIDI
-    return false;
-#else
-    return wifiProvisioning.isConnected();
-#endif
-}
+bool RTPMidiConnection::isWifiConnected() const { return wifiProvisioning.isConnected(); }
+bool RTPMidiConnection::isWifiSetupMode() const { return wifiProvisioning.isSetupMode(); }
+const char* RTPMidiConnection::wifiSetupApName() const { return wifiProvisioning.setupApSsid(); }
+bool RTPMidiConnection::hasRtpSession() const { return rtpPeers_ > 0; }
+const char* RTPMidiConnection::localIpString() const { return ipString_; }
 
-bool RTPMidiConnection::isWifiSetupMode() const
+void RTPMidiConnection::sendRawMidi(const uint8_t* midiPacket, size_t length)
 {
 #if !ENABLE_RTP_MIDI
-    return false;
-#else
-    return wifiProvisioning.isSetupMode();
-#endif
-}
-
-const char* RTPMidiConnection::wifiSetupApName() const
-{
-#if !ENABLE_RTP_MIDI
-    return "";
-#else
-    return wifiProvisioning.setupApSsid();
-#endif
-}
-
-bool RTPMidiConnection::hasRtpSession() const
-{
-#if !ENABLE_RTP_MIDI
-    return false;
-#else
-    return rtpPeers_ > 0;
-#endif
-}
-
-const char* RTPMidiConnection::localIpString() const
-{
-#if !ENABLE_RTP_MIDI
-    return "";
-#else
-    return ipString_;
-#endif
-}
-
-void RTPMidiConnection::sendFromUsbPacket(const uint8_t* usbMidiPacket)
-{
-#if !ENABLE_RTP_MIDI
-    (void)usbMidiPacket;
+    (void)midiPacket;
+    (void)length;
     return;
 #else
-    if (usbMidiPacket == nullptr || rtpPeers_ <= 0 || !wifiProvisioning.isConnected()) {
+    if (midiPacket == nullptr || length < 1 || rtpPeers_ <= 0 || !wifiProvisioning.isConnected()) {
         return;
     }
 
-    const uint8_t status = usbMidiPacket[1];
-    if (status == 0x00 || status == 0xFE) {
-        return;
-    }
-
+    const uint8_t status = midiPacket[0];
     if (status >= 0xF8) {
         NetworkMidi.sendRealTime(static_cast<MIDI_NAMESPACE::MidiType>(status));
         return;
@@ -174,29 +127,29 @@ void RTPMidiConnection::sendFromUsbPacket(const uint8_t* usbMidiPacket)
     const uint8_t channel = (status & 0x0F) + 1;
     switch (status & 0xF0) {
         case 0x80:
-            NetworkMidi.sendNoteOff(usbMidiPacket[2], usbMidiPacket[3], channel);
+            NetworkMidi.sendNoteOff(midiPacket[1], midiPacket[2], channel);
             break;
         case 0x90:
-            if (usbMidiPacket[3] == 0) {
-                NetworkMidi.sendNoteOff(usbMidiPacket[2], 0, channel);
+            if (length >= 3 && midiPacket[2] == 0) {
+                NetworkMidi.sendNoteOff(midiPacket[1], 0, channel);
             } else {
-                NetworkMidi.sendNoteOn(usbMidiPacket[2], usbMidiPacket[3], channel);
+                NetworkMidi.sendNoteOn(midiPacket[1], midiPacket[2], channel);
             }
             break;
         case 0xA0:
-            NetworkMidi.sendAfterTouch(usbMidiPacket[2], usbMidiPacket[3], channel);
+            NetworkMidi.sendAfterTouch(midiPacket[1], midiPacket[2], channel);
             break;
         case 0xB0:
-            NetworkMidi.sendControlChange(usbMidiPacket[2], usbMidiPacket[3], channel);
+            NetworkMidi.sendControlChange(midiPacket[1], midiPacket[2], channel);
             break;
         case 0xC0:
-            NetworkMidi.sendProgramChange(usbMidiPacket[2], channel);
+            NetworkMidi.sendProgramChange(midiPacket[1], channel);
             break;
         case 0xD0:
-            NetworkMidi.sendAfterTouch(usbMidiPacket[2], channel);
+            NetworkMidi.sendAfterTouch(midiPacket[1], channel);
             break;
         case 0xE0: {
-            const int bend = (static_cast<int>(usbMidiPacket[3]) << 7) | usbMidiPacket[2];
+            const int bend = (static_cast<int>(midiPacket[2]) << 7) | midiPacket[1];
             NetworkMidi.sendPitchBend(bend, channel);
             break;
         }

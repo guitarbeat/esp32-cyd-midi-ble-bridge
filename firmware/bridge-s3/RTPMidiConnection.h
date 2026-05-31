@@ -18,7 +18,8 @@ public:
     bool hasRtpSession() const;
     const char* localIpString() const;
 
-    void sendFromUsbPacket(const uint8_t* usbMidiPacket);
+    /** @brief Sends a raw MIDI message to all connected RTP peers. */
+    void sendRawMidi(const uint8_t* midiPacket, size_t length);
 
 #if ENABLE_RTP_MIDI
     void onRtpConnected(uint32_t ssrc, const char* name);
