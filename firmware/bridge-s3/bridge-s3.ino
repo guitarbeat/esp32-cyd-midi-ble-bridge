@@ -8,6 +8,7 @@
 #include "InputManager.h"
 #include "USBConnection.h"
 #include "BLEConnection.h"
+#include "UartConnection.h"
 #include "ConnectivityManager.h"
 #include "BridgeSystem.h"
 #include "MidiBridge.h"
@@ -20,6 +21,7 @@ static Arduino_Canvas* canvas = nullptr;
 
 static USBConnection usbMidi;
 static BLEConnection bleMidi;
+static UartConnection uartMidi;
 static BongoCatDisplay bongoCat;
 
 void setup()
@@ -75,11 +77,13 @@ void setup()
     midiBridge.setMidiEngine(&bridgeSystem.engine());
     midiBridge.addTransport(&usbMidi);
     midiBridge.addTransport(&bleMidi);
+    midiBridge.addTransport(&uartMidi);
     midiBridge.addTransport(&connectivityManager);
 
     // 6. Start Transports
     usbMidi.begin();
     bleMidi.begin(bridgeSystem.settings().bleDeviceName());
+    uartMidi.begin();
     connectivityManager.begin();
     bongoCat.begin();
 
@@ -97,6 +101,7 @@ void loop()
     
     usbMidi.task();
     bleMidi.task();
+    uartMidi.task();
     connectivityManager.task();
     
     // UI Refresh

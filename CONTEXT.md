@@ -16,6 +16,6 @@ Use these terms exactly when discussing or implementing changes. This ensures co
 ## Domain Specifics
 
 - **MidiBridge** — The central coordinator that routes MIDI packets between transports.
-- **Transport** — A physical or logical MIDI connection (USB, BLE, RTP-MIDI).
+- **Transport** — A physical or logical MIDI connection (USB, BLE, RTP-MIDI, UART-MIDI).
 - **BridgeUi** — The module responsible for all visual feedback and user input handling.
 - **ConnectivityManager** — (Planned) A deep module to manage all network-related state (WiFi, Provisioning, RTP-MIDI).
