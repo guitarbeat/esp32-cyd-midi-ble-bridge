@@ -12,6 +12,7 @@
 #include "animation/BongoCat.h"
 
 BridgeUi bridgeUi;
+static constexpr int16_t kSidebarW = 54;
 
 void BridgeUi::begin(Arduino_GFX* gfx_ptr, int16_t backlight_pin)
 {
@@ -132,7 +133,7 @@ void BridgeUi::refresh(uint32_t nowMs, bool force)
         gfx->setTextSize(2); gfx->setCursor(10, y + 10); gfx->print(value);
     };
 
-    drawMetric(12, "TRANS", String(engine_->transpose() > 0 ? "+" : "") + String(engine_->transpose()), 
+    drawMetric(12, "TRANS", (String(engine_->transpose() > 0 ? "+" : "") + String(engine_->transpose())).c_str(), 
                engine_->transpose() != 0 ? RGB565_GOLD : RGB565(120, 120, 140));
     
     char chanBuf[8];
@@ -241,3 +242,22 @@ void BridgeUi::drawToast(uint32_t nowMs) {
     }
 }
 void BridgeUi::sendAllNotesOff() { /* Panic logic */ }
+
+bool BridgeUi::shouldDrawFullMetrics() const {
+    return displayMode_ == DisplayMode::kFull;
+}
+
+bool BridgeUi::shouldDrawStatusPanel() const {
+    return displayMode_ == DisplayMode::kFull || displayMode_ == DisplayMode::kPerformance;
+}
+
+const char* BridgeUi::displayModeName() const
+{
+    switch (displayMode_) {
+        case DisplayMode::kFull: return "FULL";
+        case DisplayMode::kPerformance: return "PERF";
+        case DisplayMode::kMinimal: return "MINI";
+        case DisplayMode::kStage: return "STAGE";
+        default: return "UNKNOWN";
+    }
+}

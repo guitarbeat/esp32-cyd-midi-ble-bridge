@@ -6,7 +6,7 @@
 class S3UsbOtgBoard : public Board {
 public:
     S3UsbOtgBoard() : 
-        bus(new Arduino_ESP32LCD8080(
+        bus(new Arduino_ESP32LCD8(
             45 /* DC */, 0 /* CS */, 47 /* WR */, 21 /* RD */,
             39 /* D0 */, 40 /* D1 */, 41 /* D2 */, 42 /* D3 */,
             45 /* D4 */, 46 /* D5 */, 47 /* D6 */, 48 /* D7 */)),
