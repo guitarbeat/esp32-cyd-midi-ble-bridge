@@ -51,9 +51,7 @@ bool ConnectivityManager::sendMidi(const uint8_t* packet, size_t length)
 {
 #if ENABLE_RTP_MIDI
     if (g_rtp.hasRtpSession()) {
-        // Convert to RTP packet format if needed, or use send method
-        // For simplicity in refactor, we assume 4-byte MIDI 1.0 USB packets
-        g_rtp.sendFromUsbPacket(packet);
+        g_rtp.sendRawMidi(packet, length);
         return true;
     }
 #endif

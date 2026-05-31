@@ -314,7 +314,9 @@ void USBConnection::_onReceive(usb_transfer_t *transfer) {
             // CIN 0x0 is "Reserved" or "Invalid" in most MIDI 1.0 cases
             if (cin == 0x00 && status == 0x00) continue;
 
-            if (usbCon->enqueueMidiMessage(transfer->data_buffer + offset, 4)) {
+            // Extract the standard 3-byte MIDI message from the 4-byte USB packet
+            // packet[0] = CIN/Cable, packet[1..3] = MIDI data
+            if (usbCon->enqueueMidiMessage(transfer->data_buffer + offset + 1, 3)) {
                 if (!usbCon->firstMidiReceived) {
                     usbCon->firstMidiReceived = true;
                     Serial.printf("[USB] First MIDI data received (status=0x%02X)\n", status);

@@ -1,12 +1,12 @@
 #include "MidiBridge.h"
 
-#include "BridgeSettings.h"
+#include "BridgeSystem.h"
 #include "BridgeUi.h"
 #include "MidiCodec.h"
 #include "MidiEngine.h"
 
 #if ENABLE_RTP_MIDI
-#include "NetworkServices.h"
+#include "ConnectivityManager.h"
 #endif
 
 MidiBridge midiBridge;
@@ -33,30 +33,36 @@ void MidiBridge::addTransport(Transport* transport)
 
 MidiBridge::Result MidiBridge::route(Transport* source, const uint8_t* data, size_t length)
 {
-    if (data == nullptr || length < 3) return Result::kIgnored;
+    if (data == nullptr || length < 1) return Result::kIgnored;
 
-    // Use a work buffer to allow transformation
-    uint8_t workPacket[4] = {0, data[0], data[1], data[2]};
+    // Standardize to 3-byte Raw MIDI for processing
+    // (If source is USB, 'data' is already raw MIDI because we extract it in USBConnection)
+    uint8_t rawMidi[3] = {0, 0, 0};
+    memcpy(rawMidi, data, length > 3 ? 3 : length);
 
-    // Feed the MIDI Engine directly (Inverted Data Flow)
+    // 1. Live Processing (MidiEngine)
     if (engine_ != nullptr) {
-        if (!engine_->processPacket(workPacket, 4)) {
+        // processPacket works on the actual buffer to allow in-place transformation (like transpose)
+        if (!engine_->processPacket(rawMidi, 3)) {
             return Result::kFiltered;
         }
     }
 
-    // Notify UI for logging/display
+    // 2. UI Notification (Observing the transformed state)
     if (ui_ != nullptr) {
-        ui_->notifyMidiEvent(workPacket);
+        // UI uses 4-byte USB-style for its internal log, we convert back for the shim
+        uint8_t uiPacket[4] = {0, rawMidi[0], rawMidi[1], rawMidi[2]};
+        ui_->notifyMidiEvent(uiPacket);
     }
 
-    if (ui_ != nullptr && ui_->isBridgePaused()) {
+    if (bridgeSystem.isPaused()) {
         return Result::kFiltered;
     }
 
+    // 3. Hardware Routing
     for (auto* t : transports_) {
         if (t != source && t->isConnected()) {
-            t->sendMidi(workPacket + 1, length);
+            t->sendMidi(rawMidi, 3);
         }
     }
 
@@ -65,15 +71,22 @@ MidiBridge::Result MidiBridge::route(Transport* source, const uint8_t* data, siz
 
 void MidiBridge::onMidiReceived(Transport* source, const uint8_t* data, size_t length)
 {
+    // Counters
     if (source && strcmp(source->name(), "USB-HOST") == 0) {
         counters_.usbPacketsSeen++;
     }
+    
+    // Route it
     route(source, data, length);
 }
 
 MidiBridge::Result MidiBridge::forward(const uint8_t* data, size_t length, uint8_t outMidiPacket[4])
 {
+    // Legacy shim
     (void)outMidiPacket;
-    onMidiReceived(nullptr, data, length);
+    // We assume 'data' here is 4-byte USB (CIN+Status+D1+D2)
+    if (length >= 4) {
+        onMidiReceived(nullptr, data + 1, 3);
+    }
     return Result::kForwarded;
 }

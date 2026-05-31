@@ -9,9 +9,8 @@
 #include "USBConnection.h"
 #include "BLEConnection.h"
 #include "ConnectivityManager.h"
+#include "BridgeSystem.h"
 #include "MidiBridge.h"
-#include "MidiEngine.h"
-#include "BridgeSettings.h"
 #include "BridgeUi.h"
 #include "animation/BongoCat.h"
 
@@ -33,54 +32,48 @@ void setup()
         while(1) delay(100);
     }
     
-    // 2. Settings and Canvas
-    bridgeSettings.begin("Piano BLE Bridge");
-    canvas = new Arduino_Canvas(240, 240, board->getDisplay());
+    // 2. System Controller (Brain)
+    bridgeSystem.begin();
     
-    // 3. Input Mapping (Board -> InputManager -> UI)
+    // 3. UI and Graphics
+    canvas = new Arduino_Canvas(240, 240, board->getDisplay());
+    if (canvas->begin()) {
+        bridgeUi.begin(canvas);
+        bridgeUi.setBoard(board);
+        bridgeUi.setBongoCat(&bongoCat);
+    }
+    
+    // 4. Input Mapping
     inputManager.mapButton("OK", board->getButtonPin("OK"));
     inputManager.mapButton("UP", board->getButtonPin("UP"));
     inputManager.mapButton("DOWN", board->getButtonPin("DOWN"));
     inputManager.mapButton("MENU", board->getButtonPin("MENU"));
 
     inputManager.onEvent("OK", [](InputManager::Event e){ 
-        if (e == InputManager::Event::kTap) bridgeUi.onOkTap();
-        else if (e == InputManager::Event::kLongHold) bridgeUi.onOkHold();
+        if (e == InputManager::Event::kTap) bridgeUi.cycleDisplayMode();
+        else if (e == InputManager::Event::kLongHold) bridgeSystem.sendPanic();
     });
-    inputManager.onEvent("UP", [](InputManager::Event e){ if (e == InputManager::Event::kTap) bridgeUi.onUpTap(); });
-    inputManager.onEvent("DOWN", [](InputManager::Event e){ if (e == InputManager::Event::kTap) bridgeUi.onDownTap(); });
+    inputManager.onEvent("UP", [](InputManager::Event e){ if (e == InputManager::Event::kTap) bridgeSystem.stepTranspose(1); });
+    inputManager.onEvent("DOWN", [](InputManager::Event e){ if (e == InputManager::Event::kTap) bridgeSystem.stepTranspose(-1); });
     inputManager.onEvent("MENU", [](InputManager::Event e){
-        if (e == InputManager::Event::kTap) bridgeUi.onMenuTap();
-        else if (e == InputManager::Event::kLongHold) bridgeUi.onMenuHold();
+        if (e == InputManager::Event::kTap) bridgeSystem.cycleMidiChannel();
+        else if (e == InputManager::Event::kLongHold) connectivityManager.startProvisioning();
     });
 
-    // 4. UI and Engine Setup
-    if (canvas->begin()) {
-        bridgeUi.begin(canvas);
-        bridgeUi.setBoard(board);
-        bridgeUi.setMidiEngine(&midiEngine);
-        bridgeUi.setBongoCat(&bongoCat);
-    }
-    
     // 5. MIDI Hub Coordination
-    midiBridge.begin(&bridgeSettings, &bridgeUi);
-    midiBridge.setMidiEngine(&midiEngine);
+    midiBridge.begin(&bridgeSystem.settings(), &bridgeUi);
+    midiBridge.setMidiEngine(&bridgeSystem.engine());
     midiBridge.addTransport(&usbMidi);
     midiBridge.addTransport(&bleMidi);
     midiBridge.addTransport(&connectivityManager);
 
     // 6. Start Transports
     usbMidi.begin();
-    bleMidi.begin(bridgeSettings.bleDeviceName());
+    bleMidi.begin(bridgeSystem.settings().bleDeviceName());
     connectivityManager.begin();
     bongoCat.begin();
 
-    // 7. Final UI Links
-    bridgeUi.setUsbMidi(&usbMidi);
-    bridgeUi.setBle(&bleMidi);
-    bridgeUi.setMidiBridge(&midiBridge);
-
-    Serial.println("[SYSTEM] Minimal Rack architecture initialized.");
+    Serial.println("[SYSTEM] Deep Controller architecture initialized.");
 }
 
 void loop()
@@ -90,12 +83,13 @@ void loop()
     // Periodic Maintenance
     board->task();
     inputManager.task(now);
+    bridgeSystem.tick(now);
+    
     usbMidi.task();
     bleMidi.task();
     connectivityManager.task();
     
     // UI Refresh
-    bridgeUi.tick(now);
     bridgeUi.refresh(now);
     canvas->flush();
     
